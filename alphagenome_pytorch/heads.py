@@ -514,7 +514,7 @@ class GenomeTracksHead(Head):
         )
         self._input_seq_len = input_seq_len
         self._num_tracks = num_tracks
-        self.register_buffer('_track_means', track_means)       # [O, T]
+        self.register_buffer('_track_means', torch.tensor(track_means))     # [O, T]
         self._resolutions = sorted(resolutions)
         self._apply_squashing = apply_squashing
         self._bundle = bundle

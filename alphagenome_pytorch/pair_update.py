@@ -194,9 +194,8 @@ class RowAttentionBlock(nn.Module):
         x = torch.einsum('bpPk,bpkf->bpPf', a, v)                           # [B, P, P, F]
 
         # Output
-        y = self.out(x)                                                     # [B, P, P, F]
-        y = self.dropout(y)                                                 # [B, P, P, F]
-        return y
+        x = self.dropout(x)                                                 # [B, P, P, F]
+        return x
 
 
 class PairMLPBlock(nn.Module):
@@ -211,7 +210,7 @@ class PairMLPBlock(nn.Module):
         self.norm = EMA_RMSBatchNorm(self.pair_channels, channels_dim=3)
         self.fc1 = nn.Linear(self.pair_channels, self.pair_channels * self.mlp_ratio)
         self.fc2 = nn.Linear(self.pair_channels * self.mlp_ratio, self.pair_channels)
-        self.act = nn.GELU()
+        self.act = nn.ReLU()
         self.dropout = nn.Dropout(self.dropout)
 
     def forward(self, x):
