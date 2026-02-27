@@ -2,7 +2,7 @@
 
 
 ## Setup
-(1) Have the necessary dependencies installed (see `*/AlphaGenom_PyTorch/docs/environment`) for details on setting up an environment.
+(1) Have the necessary dependencies installed (see `*/AlphaGenome_PyTorch/docs/environment`) for details on setting up an environment.
 (2) Make sure AlphaGenome_PyTorch is in your Python path: `cd ../.. && export PYTHONPATH=$(pwd):$PYTHONPATH && cd docs/examples`
 
 
