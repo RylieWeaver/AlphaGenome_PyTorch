@@ -1,7 +1,7 @@
 # AlphaGenome_PyTorch
 Repository for AlphaGenome_PyTorch.
 
-![AlphaGenome Model Architecture](../../images/AG_Architecture.png)
+![AlphaGenome Model Architecture](images/AG_Architecture.png)
 
 
 
