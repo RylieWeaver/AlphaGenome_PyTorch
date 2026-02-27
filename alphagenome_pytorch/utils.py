@@ -1,4 +1,5 @@
-
+# Provenance: Reimplementation based on the AlphaGenome bioRxiv paper. Rylie Weaver, 2026.
+# SPDX-License-Identifier: Apache-2.0
 
 # General
 
@@ -100,24 +101,38 @@ class EMA_RMSBatchNorm(nn.Module):
         return y
 
 
-class StandardizedConv1d(nn.Conv1d):
-    def __init__(self, in_channels, out_channels, kernel_size, eps=1e-6):
-        super().__init__(in_channels, out_channels, kernel_size, padding=kernel_size // 2)
-        self.eps = eps
-        fan_in = (in_channels // self.groups) * kernel_size
-        self.gamma = nn.Parameter(torch.full((out_channels, 1, 1), fan_in**-0.5))
+class StandardizedConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
 
-    def forward(self, x):
+        # Initialization
+        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size))
+        self.scale = nn.Parameter(torch.ones(out_channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(out_channels))
+
+    def forward(self, x):                               # x: [B, C_in, S]
+        # Setup
+        fan_in = self.kernel_size * self.in_channels
+        w = self.weight
+
         # Normalize weights
-        w = self.weight                                                     # [C_out, C_in/groups, K]
-        mean = w.mean((1, 2), keepdim=True)                                 # [C_out, 1, 1]
-        var = w.var((1, 2), unbiased=False, keepdim=True)                   # [C_out, 1, 1]
-        w_std = (w - mean) / (var.add(self.eps).sqrt())                     # [C_out, C_in/groups, K]
-        w_hat = w_std * self.gamma                                          # [C_out, C_in/groups, K]
+        w = w - w.mean(dim=(1, 2), keepdim=True)        # [C_out, C_in, K]
+        var_w = w.var(dim=(1, 2), keepdim=True)         # [C_out, 1, 1]
+        w_scale = self.scale * torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
+        w_standardized = w * w_scale                    # [C_out, C_in, K]
 
         # Apply conv1d with normalized weights
-        x = F.conv1d(x, w_hat, self.bias, self.stride, self.padding)        # [B, C_in, S] --> [B, C_out, S]
-        return x
+        out = F.conv1d(
+            x,
+            w_standardized,
+            bias=self.bias,
+            stride=1,
+            padding=self.kernel_size // 2,
+        )                                               # [B, C_in, S] --> [B, C_out, S]
+        return out                                      # [B, C_out, S]
 
 
 class ConvBlock(nn.Module):

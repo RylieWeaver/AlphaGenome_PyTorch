@@ -387,11 +387,18 @@ class MultiOrganismLinear(nn.Module):
         # NOTE: parameters are NOT shared across organisms
         w_shape = (num_organisms, in_channels, out_channels)
         b_shape = (num_organisms, out_channels)
-        bound = 1 / math.sqrt(in_channels)
         self.weight = nn.Parameter(torch.Tensor(*w_shape))
         self.bias = nn.Parameter(torch.Tensor(*b_shape))
-        nn.init.uniform_(self.weight, -bound, bound)
-        nn.init.uniform_(self.bias, -bound, bound)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        # Match Haiku VarianceScaling(fan_in, truncated_normal)
+        fan_in = self.in_channels
+        target_std = math.sqrt(1.0 / fan_in)
+        trunc_std_correction = 0.8796256610342398  # std of N(0,1) truncated to [-2, 2]
+        raw_std = target_std / trunc_std_correction
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=raw_std, a=-2 * raw_std, b=2 * raw_std)
+        nn.init.zeros_(self.bias)
 
     def forward(
         self,
@@ -514,7 +521,11 @@ class GenomeTracksHead(Head):
         )
         self._input_seq_len = input_seq_len
         self._num_tracks = num_tracks
-        self.register_buffer('_track_means', torch.tensor(track_means))     # [O, T]
+        if isinstance(track_means, torch.Tensor):
+            _track_means = track_means.detach().clone()
+        else:
+            _track_means = torch.as_tensor(track_means)
+        self.register_buffer("_track_means", _track_means.to(torch.float32))    # [O, T]
         self._resolutions = sorted(resolutions)
         self._apply_squashing = apply_squashing
         self._bundle = bundle
