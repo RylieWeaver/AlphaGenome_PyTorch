@@ -137,7 +137,7 @@ if __name__ == "__main__":
         optimizer.step()
 
     # Save the model
-    model.cfg.save(cfg_path="AG_mlm_pretrained_config.json", metadata_path="AG_mlm_pretrained_metadata.json")
+    model.cfg.save(cfg_path="AG_mlm_pretrained_config.json", metadata_path="AG_mlm_pretrained_metadata.pth")
     torch.save(model.state_dict(), "AG_mlm_pretrained.pth")
     print("Finished MLM pretraining and saved the model! Now starting fine-tuning on downstream tasks...")
 
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     ### PART 2: FINE-TUNE ON DOWNSTREAM TASKS (RNA-seq, CAGE, ATAC, Splice Site Prediction) #####
 
     # We don't need to save/load the model here, but do so for completeness in the example
-    model_cfg = AlphaGenomeConfig.load(cfg_path="AG_mlm_pretrained_config.json", metadata_path="AG_mlm_pretrained_metadata.json")
+    model_cfg = AlphaGenomeConfig.load(cfg_path="AG_mlm_pretrained_config.json", metadata_path="AG_mlm_pretrained_metadata.pth")
     model = AlphaGenome(model_cfg).to(device)
     model.load_state_dict(torch.load("AG_mlm_pretrained.pth"))
 
