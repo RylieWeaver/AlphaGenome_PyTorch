@@ -258,7 +258,7 @@ class AlphaGenome(nn.Module):
             tissue_mask=tissue_mask,
         )
 
-    def forward(self, batch: DataBatch, organism_index: torch.Tensor | None = None):
+    def forward(self, batch: DataBatch, organism_index: torch.Tensor | None = None, return_embeddings: bool = True):
         # Unpack batch
         x = batch.dna_sequence                                                          # [B, S, V]
         B, S, _ = x.shape
@@ -294,11 +294,7 @@ class AlphaGenome(nn.Module):
             embeddings_128bp=embeddings_t,
             embeddings_pair=embeddings_pair,
         )
-        predictions = {
-            'embeddings_1bp': embeddings_x,
-            'embeddings_128bp': embeddings_t,
-            'embeddings_pair': embeddings_pair,
-        }
+        predictions = {}
 
         for head_name, head_fn in self._heads.items():
             if not self.metadata.metadata['heads'][head_name].get("enabled", True):
@@ -345,7 +341,7 @@ class AlphaGenome(nn.Module):
             )
         return predictions, embeddings
 
-    def loss(self, batch: DataBatch) -> torch.Tensor:
+    def loss(self, batch: DataBatch):
         predictions, _ = self(batch, batch.get_organism_index())
         total_loss, all_scalars = 0.0, {}
         for head_name, head_fn in self._heads.items():

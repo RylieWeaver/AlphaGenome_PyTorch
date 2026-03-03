@@ -80,7 +80,7 @@ class Metadata():
         Returns the list of head names in the metadata. We assume that all organisms have the same heads, so we
         can just look at the first organism.
         """
-        return list(self.metadata["heads"].keys())
+        return list(self.metadata.get("heads", {}).keys())
 
     def get_num_organisms(self) -> int:
         """

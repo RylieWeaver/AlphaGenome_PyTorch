@@ -5,9 +5,7 @@ import random
 import torch
 
 # AlphaGenome
-from alphagenome_pt import AlphaGenome, AlphaGenomeConfig
-from alphagenome_pt.schemas import DataBatch
-from alphagenome_pt.sequence_encoder import SequenceEncoder
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, DataBatch, SequenceEncoder
 from utils import resolve_device, move_to, bert_mlm
 
 
@@ -18,7 +16,6 @@ if __name__ == "__main__":
 
     # Define some size variables for synthetic data/metadata generation
     organisms = ['human', 'mouse']
-
     # Define metadata
     metadata = {
         'organisms': organisms,
@@ -28,11 +25,7 @@ if __name__ == "__main__":
     }
 
     # Define the model
-    model_cfg = AlphaGenomeConfig(
-        input_seq_len=2048,
-        num_channels=96,
-        metadata=metadata
-    )
+    model_cfg = AlphaGenomeConfig(input_seq_len=2048, num_channels=96, metadata=metadata)
     model = AlphaGenome(model_cfg).to(device)
     # print(model)
 

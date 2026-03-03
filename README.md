@@ -8,6 +8,22 @@
 ## Docs
 The `docs` directory contains instructions on environment setup, explanations of the data structure and model architecture, and running examples. It's strongly recommended to read the `model.md` and `data.md` markdown files in the `*/AlphaGenome_PyTorch/docs/guides` directory before running examples so that you can understand why the metadata and dummy data are structured the way they are.
 
+### Quick Start
+Very easy quick start to get embeddings:
+```
+import torch, random
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, DataBatch, SequenceEncoder
+S = 2048
+metadata = {'organisms': ['human', 'mouse']}
+model_cfg = AlphaGenomeConfig(input_seq_len=S, num_channels=96, metadata=metadata)
+model = AlphaGenome(model_cfg)
+seq_encoder = SequenceEncoder()
+dna_sequence = seq_encoder.encode("".join(random.choices("ACGT", k=S)))
+data = DataBatch(dna_sequence=dna_sequence, organism_index=torch.tensor([0]))
+predictions, embeddings = model(data)
+print(embeddings.embeddings_1bp.shape, embeddings.embeddings_1bp.shape, embeddings.embeddings_pair.shape)
+```
+
 ### Environment
 See `*/AlphaGenome_PyTorch/docs/environment` for instructions on how to set up a UV environment to run AlphaGenome_PyTorch.
 

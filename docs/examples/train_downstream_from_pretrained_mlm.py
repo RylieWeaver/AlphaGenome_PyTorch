@@ -7,10 +7,7 @@ import torch
 import torch.nn.functional as F
 
 # AlphaGenome
-from alphagenome_pt import AlphaGenome, AlphaGenomeConfig
-from alphagenome_pt.metadata import Metadata
-from alphagenome_pt.schemas import DataBatch
-from alphagenome_pt.sequence_encoder import SequenceEncoder
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, Metadata, DataBatch, SequenceEncoder
 from utils import resolve_device, move_to, bert_mlm, make_means
 
 
