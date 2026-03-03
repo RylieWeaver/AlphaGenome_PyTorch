@@ -1,0 +1,44 @@
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11.0"]
+build-backend = "uv_build"
+
+[project]
+name = "alphagenome_pt"
+version = "0.0.1"
+authors = [
+  { name="Rylie Weaver", email="rylieweaver9@gmail.com" },
+  { name="John Lagergren", email="lagergrenjh@ornl.gov" }
+]
+dependencies = [
+  "torch>=2.0",
+  "numpy>=1.22",
+  "einops>=0.6",
+]
+description = "An implementation of AlphaGenome in PyTorch."
+keywords = [
+  "alphagenome",
+  "pytorch",
+  "deep-learning",
+  "genomics",
+  "dna",
+  "transformer",
+]
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+license = { text = "Apache-2.0" }
+license-files = ["LICEN[CS]E*"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+]
+
+[project.urls]
+Homepage = "https://github.com/RylieWeaver/AlphaGenome_PyTorch"
+Issues = "https://github.com/RylieWeaver/AlphaGenome_PyTorch/issues"

@@ -5,9 +5,9 @@ import random
 import torch
 
 # AlphaGenome
-from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig
-from alphagenome_pytorch.schemas import DataBatch
-from alphagenome_pytorch.sequence_encoder import SequenceEncoder
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig
+from alphagenome_pt.schemas import DataBatch
+from alphagenome_pt.sequence_encoder import SequenceEncoder
 from utils import resolve_device, move_to, bert_mlm
 
 

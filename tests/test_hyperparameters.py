@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig
-from alphagenome_pytorch.schemas import DataBatch
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig
+from alphagenome_pt.schemas import DataBatch
 
 from .helpers import (
     assert_finite_scalars,

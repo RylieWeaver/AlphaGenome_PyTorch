@@ -1,6 +1,6 @@
 import torch
 
-from alphagenome_pytorch.schemas import DataBatch
+from alphagenome_pt.schemas import DataBatch
 
 from .helpers import (
     assert_finite_scalars,

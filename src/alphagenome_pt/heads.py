@@ -926,9 +926,9 @@ class SpliceSitesJunctionHead(Head):
         def _index_embedding(embedding, indices):
             # embedding: [B, S, C], indices: [B, P] (may contain -1)
             B, S, C = embedding.shape
-            safe = indices.clamp(min=0)                 # gather can’t take -1
-            idx = safe.unsqueeze(-1).expand(-1, -1, C)  # [B, P, C]
-            return embedding.gather(dim=1, index=idx)   # [B, P, C]
+            safe = indices.clamp(min=0)                         # gather can’t take -1
+            idx = safe.unsqueeze(-1).expand(-1, -1, C).long()   # [B, P, C]
+            return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
         def _apply_rope(x, indices):                                            # x: [B, S, C_splice] | indices: [B, P]
             x = _index_embedding(x, indices).to(torch.float32)                  # [B, P, C_splice]

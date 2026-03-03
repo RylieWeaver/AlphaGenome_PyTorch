@@ -4,9 +4,9 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 
-from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig
-from alphagenome_pytorch.metadata import Metadata
-from alphagenome_pytorch.sequence_encoder import SequenceEncoder
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig
+from alphagenome_pt.metadata import Metadata
+from alphagenome_pt.sequence_encoder import SequenceEncoder
 
 
 ORGANISMS = ("human", "mouse")

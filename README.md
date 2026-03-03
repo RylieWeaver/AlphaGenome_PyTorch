@@ -22,17 +22,17 @@ See `*/AlphaGenome_PyTorch/docs/examples` for examples of:
 
 
 ## Licensing
-The repository is a reimplementation of the AlphaGenome model in PyTorch, along with the added option to do Masked Language Modeling. Within the `alphagenome_pytorch` directory, some components are direct ports of the released AlphaGenome code, some are reimplementations from the paper's (fairly verbose) pseudocode, and others are added by me (e.g. MLM head) - the attribution is made clear at the top of each file in the `alphagenome_pytorch` directory. Aside from that, the `docs` and `tests` directories are written by me (with LLM coding assistance).
-
-
-## Licensing
 This repository is a reimplementation of the AlphaGenome model in PyTorch, with an added option for Masked Language Modeling (MLM).
 
-Within the `alphagenome_pytorch` directory, some components are direct ports of the released AlphaGenome code [Link1](https://github.com/google-deepmind/alphagenome) [Link2](https://github.com/google-deepmind/alphagenome_research) (licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)), some are reimplementations based on pseudocode from the [BioArXiV paper](https://www.biorxiv.org/content/10.1101/2025.06.25.661532v1), and others are original additions (e.g., the MLM head). Attribution is made clear at the top of each file in the `alphagenome_pytorch` directory. The `docs` and `tests` directories are original work (with LLM coding assistance).
+Within the `alphagenome_pt` directory, some components are direct ports of the released AlphaGenome code [Link1](https://github.com/google-deepmind/alphagenome) [Link2](https://github.com/google-deepmind/alphagenome_research) (licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)), some are reimplementations based on pseudocode from the [BioArXiV paper](https://www.biorxiv.org/content/10.1101/2025.06.25.661532v1), and others are original additions (e.g., the MLM head). Attribution is made clear at the top of each file in the `alphagenome_pt` directory. The `docs` and `tests` directories are original work (with LLM coding assistance).
 
 
 ## Intended Audience
 This intended audience of this repo is model trainers: those who might want to take the AlphaGenome architecture and train it in a way that gives them some flexibility over hyperparameters, and/or do the training in PyTorch rather than Jax. If you can prepare a batch of tensor data and set up a train/val/test loop, but don't want the hassle of making sure every linear layer and norm is placed correctly while replicating the architecture, then this repo is for you. The added MLM pretraining head is also a plus.
+
+
+## Other Implementations
+There is another AlphaGenome PyTorch implementation out [here](https://pypi.org/project/alphagenome-pytorch/0.2.8/#description) by Phillip Wang (a.k.a. LucidRains) which is quite good. The GitHub page is down as of March 2nd, 2026, but the PyPi package remains. The main advantages of that implementation (as of version 0.2.8) are in evaluation (loading the published weights and running variant scoring). The main advantage of this implementation is research training (an MLM head and track masks that can vary by batch in training). This implementation also has a `.loss()` function in the model to compute multi-resolution losses for you, and one head per task with dense weight tensor of shape [O, D, T] rather than separate weights tensors of shape [D, T] for each [organism x task], which is mathematically equivalent but more in-line with the original AlphaGenome implementation.
 
 
 ## Reaching Out
