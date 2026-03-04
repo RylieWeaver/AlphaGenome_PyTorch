@@ -339,7 +339,10 @@ class AlphaGenome(nn.Module):
                 embeddings, splice_site_positions, 
                 organism_index, tissue_mask=batch.splice_site_junction_mask
             )
-        return predictions, embeddings
+        if return_embeddings:
+            return predictions, embeddings
+        else:
+            return predictions
 
     def loss(self, batch: DataBatch):
         predictions, _ = self(batch, batch.get_organism_index())
