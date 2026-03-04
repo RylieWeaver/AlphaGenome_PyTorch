@@ -1,7 +1,13 @@
 # AlphaGenome_PyTorch
 <p align="left">
-  <img src="images/AG_Architecture.png" width="400"/>
+  <img src="images/AG_PyTorch.png" width="800"/>
 </p>
+<!-- <p align="left">
+  <img src="images/AG_Total.png" width="800"/>
+</p> -->
+<!-- <p align="left">
+  <img src="images/AG_Architecture.png" width="400"/>
+</p> -->
 
 
 
