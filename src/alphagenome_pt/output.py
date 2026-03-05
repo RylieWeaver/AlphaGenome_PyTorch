@@ -8,7 +8,7 @@
 import torch.nn as nn
 
 # AlphaGenome
-from .utils import EMA_RMSBatchNorm
+from .utils import EMA_RMSBatchNorm, GELU_1702
 
 
 
@@ -27,7 +27,7 @@ class OutputEmbedder(nn.Module):
         self.fc_skip = nn.Linear(self.skip_channels, self.up_channels, bias=False) if self.skip_channels is not None else None
         self.org = nn.Embedding(self.num_organisms, self.up_channels)
         self.norm = EMA_RMSBatchNorm(self.up_channels, channels_dim=2)
-        self.activation = nn.GELU()
+        self.activation = GELU_1702()
 
 
     def forward(self, x, organism_index, skip_x=None):          # [B, S, C], [B, S', C'], int
@@ -59,7 +59,7 @@ class OutputPairEmbedder(nn.Module):
         self.num_organisms = num_organisms
         self.norm = EMA_RMSBatchNorm(pair_channels, channels_dim=3)
         self.embed = nn.Embedding(num_organisms, pair_channels)
-        self.act = nn.GELU()
+        self.act = GELU_1702()
 
     def forward(self, x, organism_index):               # x: [B, P, P, F] | organism_index: [B]
         # Symmetrize
@@ -77,22 +77,3 @@ class OutputPairEmbedder(nn.Module):
         # Apply activation
         x = self.act(x)                                             # [B, P, P, F]
         return x
-
-
-class TokenPredBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        # Read inputs
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-
-        # Modules
-        self.block = nn.Sequential(
-            nn.Linear(in_channels, in_channels),
-            nn.GELU(),
-            nn.LayerNorm(in_channels) if in_channels > 1 else nn.Identity(),
-            nn.Linear(in_channels, out_channels),
-        )
-
-    def forward(self, x):           # [B, S, C_in]
-        return self.block(x)        # [B, S, C_out_task]

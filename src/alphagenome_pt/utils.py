@@ -6,10 +6,18 @@
 # Torch
 import torch
 import torch.nn as nn
+from torch.nn import Module
 import torch.nn.functional as F
 
 # AlphaGenome
 
+
+
+class GELU_1702(Module):
+    # NOTE: AlphaGenome applies a custom scaled GELU
+    # in its conv blocks and output embeddings.
+    def forward(self, x):
+        return torch.sigmoid(1.702 * x) * x
 
 
 def _pad_dim(x: torch.Tensor, n: int, dim=-1, value=0.0):
@@ -68,7 +76,7 @@ class EMA_RMSBatchNorm(nn.Module):
     NOTE: Future versions may add an argument for distributed 
     reduction across devices while maintaining grads.
     """
-    def __init__(self, num_channels, channels_dim=2, eps=1e-6, decay=0.9, sync=True):
+    def __init__(self, num_channels, channels_dim=2, eps=1e-6, decay=0.9):
         super().__init__()
         self.num_channels = num_channels
         self.channels_dim = channels_dim
@@ -76,7 +84,6 @@ class EMA_RMSBatchNorm(nn.Module):
         self.decay = decay
         self.gamma = nn.Parameter(torch.zeros(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
-        self.sync = sync
         self.register_buffer("var_EMA", torch.ones(num_channels))
 
     def forward(self, x):
@@ -139,7 +146,7 @@ class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, width=5):
         super().__init__()
         self.norm = EMA_RMSBatchNorm(in_channels, channels_dim=1)
-        self.act = nn.GELU()
+        self.act = GELU_1702()
         if width == 1:
             self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=width, padding=width // 2)  # equivalent to nn.Linear() but expects channels first shape
         else:
