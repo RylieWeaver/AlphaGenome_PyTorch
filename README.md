@@ -44,10 +44,12 @@ See `*/AlphaGenome_PyTorch/docs/examples` for examples of:
 - MLM Pretraining --> Training on Downstream Tasks (`train_downstream_from_pretrained.py`)
 
 
-## Licensing
+## Acknowledgements
 This repository is a reimplementation of the AlphaGenome model in PyTorch, with an added option for Masked Language Modeling (MLM).
 
 Within the `alphagenome_pt` directory, some components are direct ports of the released AlphaGenome code [Link1](https://github.com/google-deepmind/alphagenome) [Link2](https://github.com/google-deepmind/alphagenome_research) (licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)), some are reimplementations based on pseudocode from the [BioArXiV paper](https://www.biorxiv.org/content/10.1101/2025.06.25.661532v1), and others are original additions (e.g., the MLM head). Attribution is made clear at the top of each file in the `alphagenome_pt` directory. The `docs` and `tests` directories are original work (with LLM coding assistance).
+
+Developing this project used resources of the Oak Ridge Leadership Computing Facility, which is a DOE Office of Science User Facility supported under Contract DE-AC05-00OR22725.
 
 
 ## Intended Audience
