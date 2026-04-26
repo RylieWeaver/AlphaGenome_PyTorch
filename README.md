@@ -22,7 +22,7 @@ import torch, random
 from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, DataBatch, SequenceEncoder
 S = 2048
 metadata = {'organisms': ['human', 'mouse']}
-model_cfg = AlphaGenomeConfig(input_seq_len=S, num_channels=96, metadata=metadata)
+model_cfg = AlphaGenomeConfig(max_seq_len=S, num_channels=96, metadata=metadata)
 model = AlphaGenome(model_cfg)
 seq_encoder = SequenceEncoder()
 dna_sequence = seq_encoder.encode("".join(random.choices("ACGT", k=S)))

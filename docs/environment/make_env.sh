@@ -39,7 +39,7 @@ source "$ENV_NAME/bin/activate"
 
 # Install dependencies
 echo "Installing dependencies..."
-uv pip install torch numpy einops
+uv pip install torch numpy einops huggingface_hub
 
 echo
 echo "Setup complete!"

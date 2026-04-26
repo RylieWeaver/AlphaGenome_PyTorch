@@ -73,7 +73,7 @@ if __name__ == "__main__":
 
     # Define the model
     model_cfg = AlphaGenomeConfig(
-        input_seq_len=2048,
+        max_seq_len=2048,
         num_channels=96,
         metadata=metadata
     )
@@ -81,7 +81,7 @@ if __name__ == "__main__":
     # print(model)
 
     # Get synthetic data parameters from model/metadata
-    S = model.input_seq_len
+    S = model.max_seq_len
     k = model.num_splice_sites
     num_classes = max(T_ssc)
 

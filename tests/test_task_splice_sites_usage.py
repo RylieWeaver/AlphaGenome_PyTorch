@@ -21,7 +21,7 @@ def test_splice_sites_usage_head():
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = make_organism_index(batch_size, num_organisms=2)
     num_tracks = max(heads["splice_sites_usage"]["num_tracks"])
 
@@ -41,4 +41,3 @@ def test_splice_sites_usage_head():
     assert_finite_scalars(scalars)
     assert "splice_sites_usage" in predictions
     assert predictions["splice_sites_usage"]["predictions"].shape == splice_site_usage.shape
-

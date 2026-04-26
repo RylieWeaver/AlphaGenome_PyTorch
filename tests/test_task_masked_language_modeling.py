@@ -16,7 +16,7 @@ def test_masked_language_modeling_head():
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = make_organism_index(batch_size, num_organisms=2)
     labels = torch.randint(0, 5, (batch_size, seq_len), dtype=torch.long)
 
@@ -32,4 +32,3 @@ def test_masked_language_modeling_head():
     assert_finite_scalars(scalars)
     assert "masked_language_modeling" in predictions
     assert predictions["masked_language_modeling"]["predictions"].shape == (batch_size, seq_len, 5)
-

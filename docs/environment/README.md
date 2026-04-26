@@ -18,7 +18,7 @@ uv init AlphaGenome --bare --python 3.12
 cd AlphaGenome
 uv venv ag-env --python 3.12 --native-tls
 source ag-env/bin/activate
-uv pip install torch numpy einops
+uv pip install torch numpy einops huggingface_hub
 ```
 
 

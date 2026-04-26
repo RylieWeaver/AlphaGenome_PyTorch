@@ -1,10 +1,14 @@
+# External Imports
 import random
 from collections.abc import Sequence
-
 import torch
 import torch.nn.functional as F
 
+# Internal Imports
 from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, Metadata, SequenceEncoder
+
+# Helpful Commands
+# - pytest tests
 
 
 ORGANISMS = ("human", "mouse")
@@ -33,7 +37,7 @@ def build_metadata(heads: dict, organisms: Sequence[str] = ORGANISMS) -> Metadat
 
 def build_small_model(metadata: Metadata, **cfg_overrides) -> AlphaGenome:
     cfg_kwargs = {
-        "input_seq_len": 2048,
+        "max_seq_len": 2048,
         "num_channels": 64,
         "transformer_layers": 1,
         "metadata": metadata,
@@ -65,4 +69,3 @@ def make_splice_sites(batch_size: int, seq_len: int, num_classes: int) -> torch.
 def assert_finite_scalars(scalars: dict[str, torch.Tensor]) -> None:
     for key, value in scalars.items():
         assert torch.isfinite(value), key
-

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # AlphaGenome
-from .transformer import RotaryPositionalEmbeddings
+from .transformer import apply_rope
 from .metadata import Metadata
 from .schemas import Channels
 from . import bundles
@@ -64,12 +64,13 @@ class HeadConfig:
 
 @dataclasses.dataclass
 class GenomeTracksHeadConfig(HeadConfig):
-    input_seq_len: int
+    max_seq_len: int
     num_tracks: int
     track_means: torch.Tensor   # [O, T]
     resolutions: Sequence[int]
     apply_squashing: bool
     bundle: str
+    min_zero_multinomial_loss: bool = True
 
 
 @dataclasses.dataclass
@@ -89,7 +90,7 @@ class SpliceSitesUsageHeadConfig(HeadConfig):
 
 @dataclasses.dataclass
 class SpliceSitesJunctionHeadConfig(HeadConfig):
-    input_seq_len: int
+    max_seq_len: int
     splice_site_channels: int
     num_tissues: int
 
@@ -100,9 +101,10 @@ class MaskedLanguageModelingHeadConfig(HeadConfig):
 
 
 def create_heads(
-    input_seq_len: int,
+    max_seq_len: int,
     channels: Channels,
     splice_site_channels: int,
+    min_zero_multinomial_loss: bool,
     metadata: Metadata,
 ):
     heads = nn.ModuleDict()
@@ -111,9 +113,10 @@ def create_heads(
             continue
         head_config = get_head_config(
             head_name=head_name,
-            input_seq_len=input_seq_len,
+            max_seq_len=max_seq_len,
             channels=channels,
             splice_site_channels=splice_site_channels,
+            min_zero_multinomial_loss=min_zero_multinomial_loss,
             metadata=metadata,
         )
         heads[head_name.value] = create_head(head_config)
@@ -130,12 +133,13 @@ def create_head(
                 name=config.name,
                 num_organisms=config.num_organisms,
                 channels=config.channels,
-                input_seq_len=config.input_seq_len,
+                max_seq_len=config.max_seq_len,
                 num_tracks=config.num_tracks,
                 track_means=config.track_means,
                 resolutions=config.resolutions,
                 apply_squashing=config.apply_squashing,
                 bundle=config.bundle,
+                min_zero_multinomial_loss=config.min_zero_multinomial_loss,
             )
         case HeadType.CONTACT_MAPS:
             return ContactMapsHead(
@@ -163,7 +167,7 @@ def create_head(
                 name=config.name,
                 num_organisms=config.num_organisms,
                 channels=config.channels,
-                input_seq_len=config.input_seq_len,
+                max_seq_len=config.max_seq_len,
                 splice_site_channels=config.splice_site_channels,
                 num_tissues=config.num_tissues,
             )
@@ -180,9 +184,10 @@ def create_head(
 
 def get_head_config(
         head_name: HeadName,
-        input_seq_len: int,
+        max_seq_len: int,
         channels: Channels,
         splice_site_channels: int,
+        min_zero_multinomial_loss: bool,
         metadata: Metadata,
     ) -> HeadConfig:
     """Returns a head for the given head name."""
@@ -196,12 +201,13 @@ def get_head_config(
                 name=HeadName.ATAC.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.ATAC,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.DNASE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -211,12 +217,13 @@ def get_head_config(
                 name=HeadName.DNASE.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.DNASE,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.PROCAP:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -226,12 +233,13 @@ def get_head_config(
                 name=HeadName.PROCAP.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.PROCAP,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.CAGE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -241,12 +249,13 @@ def get_head_config(
                 name=HeadName.CAGE.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CAGE,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.RNA_SEQ:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -256,12 +265,13 @@ def get_head_config(
                 name=HeadName.RNA_SEQ.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[1, 128],
                 apply_squashing=True,
                 bundle=bundles.BundleName.RNA_SEQ,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.CHIP_TF:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -271,12 +281,13 @@ def get_head_config(
                 name=HeadName.CHIP_TF.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CHIP_TF,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.CHIP_HISTONE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -286,12 +297,13 @@ def get_head_config(
                 name=HeadName.CHIP_HISTONE.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
                 resolutions=[128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CHIP_HISTONE,
+                min_zero_multinomial_loss=min_zero_multinomial_loss,
             )
         case HeadName.CONTACT_MAPS:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
@@ -327,7 +339,7 @@ def get_head_config(
                 name=HeadName.SPLICE_SITES_JUNCTION.value,
                 num_organisms=num_organisms,
                 channels=channels,
-                input_seq_len=input_seq_len,
+                max_seq_len=max_seq_len,
                 splice_site_channels=splice_site_channels,
                 num_tissues=num_tissues,
             )
@@ -507,19 +519,20 @@ class GenomeTracksHead(Head):
         name: str,
         num_organisms: int,
         channels: Channels,
-        input_seq_len: int,
+        max_seq_len: int,
         num_tracks: int,
         track_means: torch.Tensor,          # [O, T]
         resolutions: Sequence[int],
         apply_squashing: bool,
         bundle: bundles.BundleName | None = None,
+        min_zero_multinomial_loss: bool = True,
     ):
         super().__init__(
             name=name,
             num_organisms=num_organisms,
             channels=channels,
         )
-        self._input_seq_len = input_seq_len
+        self._max_seq_len = max_seq_len
         self._num_tracks = num_tracks
         if isinstance(track_means, torch.Tensor):
             _track_means = track_means.detach().clone()
@@ -529,6 +542,7 @@ class GenomeTracksHead(Head):
         self._resolutions = sorted(resolutions)
         self._apply_squashing = apply_squashing
         self._bundle = bundle
+        self._min_zero_multinomial_loss = min_zero_multinomial_loss
         self.multiorg_linear = nn.ModuleDict({
             str(r): MultiOrganismLinear(
                 in_channels=channels.get_num_channels(r),       # dict: {1: C1, 128: C128, ...}
@@ -621,7 +635,8 @@ class GenomeTracksHead(Head):
             y_true=scaled_targets,
             mask=targets_mask,
             positional_weight=5.0,
-            multinomial_resolution=self._input_seq_len // resolution, 
+            multinomial_resolution=predictions.shape[-2],
+            min_zero=self._min_zero_multinomial_loss,
         )
         return all_losses
     
@@ -878,7 +893,7 @@ class SpliceSitesJunctionHead(Head):
         name: str,
         num_organisms: int,
         channels: Channels,
-        input_seq_len: int,
+        max_seq_len: int,
         splice_site_channels: int,
         num_tissues: int,
     ):
@@ -890,7 +905,7 @@ class SpliceSitesJunctionHead(Head):
         )
         self._num_tissues = num_tissues
         self._num_tracks = 2 * self._num_tissues
-        self._max_position_encoding_distance = input_seq_len
+        self._max_position_encoding_distance = max_seq_len
         self.in_channels = channels.get_num_channels(1)
         self._splice_site_channels = splice_site_channels
         self.multiorg_linear = MultiOrganismLinear(
@@ -898,12 +913,11 @@ class SpliceSitesJunctionHead(Head):
             out_channels=self._splice_site_channels,
             num_organisms=num_organisms,
         )
-        self.rope = RotaryPositionalEmbeddings(
-            num_channels=self._splice_site_channels,
-            max_position=self._max_position_encoding_distance,
-        )
         shape = (self._num_organisms, 2, self._num_tissues, self._splice_site_channels)
-        self.rope_embs = nn.Parameter(torch.zeros(shape))
+        self.pos_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
+        self.pos_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
+        self.neg_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
+        self.neg_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
     
     def _get_track_mask(self, tissue_mask) -> torch.Tensor:                     # tissue_mask: [B, #A, #D, T]
         return torch.cat([tissue_mask, tissue_mask], dim=-1).to(torch.bool)     # [B, #A, #D, 2*T]
@@ -930,20 +944,25 @@ class SpliceSitesJunctionHead(Head):
             idx = safe.unsqueeze(-1).expand(-1, -1, C).long()   # [B, P, C]
             return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
-        def _apply_rope(x, indices):                                            # x: [B, S, C_splice] | indices: [B, P]
+        def _apply_rope(x, indices, name: str):                                 # x: [B, S, C_splice] | indices: [B, P]
             x = _index_embedding(x, indices).to(torch.float32)                  # [B, P, C_splice]
-            params = get_param_for_index(self.rope_embs, organism_index)        # [B, 2, T, C_splice]
+            params = get_param_for_index(
+                getattr(self, f"{name}_embeddings"), organism_index
+            )                                                                   # [B, 2, T, C_splice]
             # scale and offset have shape [B, 1, T, C_splice]
             scale, offset = params[:, [0], :, :], params[:, [1], :, :]          # [B, 1, T, C_splice]
             x = scale * x[:, :, None, :] + offset                               # [B, P, T, C_splice]
-            return self.rope(x, indices)                                        # [B, P, T, C_splice]
+            x = apply_rope(
+                x, indices, max_position=self._max_position_encoding_distance   # [B, P, T, C_splice]
+            )
+            return x
         
         splice_site_logits = self.multiorg_linear(x, organism_index)            # [B, S, C_splice]
 
-        pos_accept_logits = _apply_rope(splice_site_logits, pos_accept_idx)     # [B, A, T, C_splice]
-        pos_donor_logits = _apply_rope(splice_site_logits, pos_donor_idx)       # [B, D, T, C_splice]
-        neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx)     # [B, A, T, C_splice]
-        neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx)       # [B, D, T, C_splice]
+        pos_accept_logits = _apply_rope(splice_site_logits, pos_accept_idx, "pos_acceptor_logits")      # [B, A, T, C_splice]
+        pos_donor_logits = _apply_rope(splice_site_logits, pos_donor_idx, "pos_donor_logits")           # [B, D, T, C_splice]
+        neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
+        neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
 
         pos_counts = F.softplus(
             torch.einsum(

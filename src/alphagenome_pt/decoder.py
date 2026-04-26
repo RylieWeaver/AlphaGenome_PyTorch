@@ -7,6 +7,7 @@
 # Torch
 import torch
 import torch.nn as nn
+from einops import repeat
 
 # AlphaGenome
 from .utils import ConvBlock
@@ -25,14 +26,14 @@ class UpResBlock(nn.Module):
         self.block2 = ConvBlock(skip_channels, skip_channels, width=1)
         self.block3 = ConvBlock(skip_channels, skip_channels, width=width)
 
-    def forward(self, x, unet_skip_x):                          # [B, C, S], [B, C_skip, S]
+    def forward(self, x, unet_skip_x):                                      # [B, C, S], [B, C_skip, S]
         _, C_skip, _ = unet_skip_x.shape
 
-        x = self.block1(x) + x[:, :C_skip, :]                   # [B, C_skip, S]
-        x = x.repeat(1, 1, 2) * self.residual_scale             # [B, C_skip, 2*S]
-        x = x + self.block2(unet_skip_x)                        # [B, C_skip, 2*S]
-        x = x + self.block3(x)                                  # [B, C_skip, 2*S]
-        return x                                                # [B, C_skip, 2*S]
+        x = self.block1(x) + x[:, :C_skip, :]                               # [B, C_skip, S]
+        x = repeat(x, 'b c s -> b c (s r)', r=2) * self.residual_scale      # [B, C_skip, 2*S]
+        x = x + self.block2(unet_skip_x)                                    # [B, C_skip, 2*S]
+        x = x + self.block3(x)                                              # [B, C_skip, 2*S]
+        return x                                                            # [B, C_skip, 2*S]
 
 class SequenceDecoder(nn.Module):
     def __init__(self,

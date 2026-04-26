@@ -6,6 +6,7 @@
 
 # Torch
 import torch.nn as nn
+from einops.layers.torch import Reduce
 
 # AlphaGenome
 from .utils import ConvBlock, _pad_dim
@@ -30,7 +31,7 @@ class DNAEmbedder(nn.Module):
 
 class DownResBlock(nn.Module):
     """
-    It's expected that out_channels < in_channels.
+    It's expected that in_channels < out_channels.
     """
     def __init__(self, in_channels, out_channels, width=5):
         super().__init__()
@@ -65,7 +66,7 @@ class SequenceEncoder(nn.Module):
         self.encoder_downsample_width = encoder_downsample_width    # W_e
         self.block_width = block_width
 
-        self.pool = nn.MaxPool1d(kernel_size=self.encoder_downsample_width, stride=self.encoder_downsample_width)
+        self.pool = Reduce('b c (s w) -> b c s', 'max', w=self.encoder_downsample_width)
         self.downres_blocks = nn.ModuleDict()
         for i in range(self.stages):
             if i == 0:

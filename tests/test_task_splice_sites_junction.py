@@ -25,7 +25,7 @@ def test_splice_sites_junction_head():
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = make_organism_index(batch_size, num_organisms=2)
     num_classes = max(heads["splice_sites_classification"]["num_tracks"])
     num_tissues = max(heads["splice_sites_junction"]["num_tissues"])
@@ -53,4 +53,3 @@ def test_splice_sites_junction_head():
     assert_finite_scalars(scalars)
     assert "splice_sites_junction" in predictions
     assert predictions["splice_sites_junction"]["predictions"].shape == splice_site_junction.shape
-

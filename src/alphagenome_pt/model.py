@@ -10,6 +10,8 @@ from pathlib import Path
 # Torch
 import torch
 import torch.nn as nn
+from einx import add
+from einops import rearrange
 
 # AlphaGenome
 from .schemas import Channels, DataBatch
@@ -26,22 +28,23 @@ from .splicing import generate_splice_site_positions
 
 class AlphaGenomeConfig():
     """
-    NOTE: The input_seq_len and metadata (determining the number of organisms, heads, and tracks)
+    NOTE: The max_seq_len and metadata (determining the number of organisms, heads, and tracks)
     are the only hyperparameters with defaults that differ from the published AlphaGenome model.
 
     NOTE: Some hyperparameters (channel_increment, qk_head_dim, v_head_dim, pair_channels, 
     num_splice_contexts, splice_site_channels) are defaulted to keep their proportions consistent 
-    with the published model wrt either channels or sequence length. The only caveat is pos_channels,
-    which had proportion (1/2^14), which istoo small to scale proportionally with our much smaller 
-    default sequence length. Instead, we set pos_channels to scale at (1//2048)*2 (must be even) and
-    be at least 2. This way, user can simply specify num_channels and input_seq_len if they want to 
-    scale the model size up or down.
+    with the published model wrt either channels or sequence length. This way, user can simply 
+    specify num_channels and max_seq_len if they want to scale the model size up or down.The only 
+    caveat is pos_channels, whose default is kept at 64 because the induced complexity is not worth
+    the cheap computational cost (it's very cheap a dynamic default would make more sense to be 
+    based on max_seq_len, which could unintentionally cause users to not be able to load the 
+    published AlphaGenome weights).
     """
     def __init__(
         self,
         # Required
-        input_seq_len: int = 8192,
-        num_channels: int = 784,
+        max_seq_len: int = 8192,
+        num_channels: int = 768,
         channel_increment: int = None,
         transformer_layers: int = 9,
         first_conv_width: int = 15,
@@ -52,7 +55,7 @@ class AlphaGenomeConfig():
         v_head_dim: int = None,
         pair_channels: int = None,
         pair_heads: int = 32,
-        pos_channels: int = None,
+        pos_channels: int = 64,
         transformer_mlp_ratio: int = 2,
         init_scale: float = 0.9,
         embedder_mlp_ratio: int = 2,
@@ -60,11 +63,12 @@ class AlphaGenomeConfig():
         num_splice_sites: int = None,
         splice_site_channels: int = None,
         splice_site_threshold: float = 0.1,
+        min_zero_multinomial_loss: bool = True,
         metadata: Union[Metadata, dict] = None,
         **kwargs  # Catches unexpected args if the config is changed in future versions
     ):
         self.model_name = "AlphaGenome"
-        self.input_seq_len = input_seq_len
+        self.max_seq_len = max_seq_len
         self.num_channels = num_channels
         self.channel_increment = channel_increment if channel_increment is not None else num_channels // 6
         self.transformer_layers = transformer_layers
@@ -76,8 +80,7 @@ class AlphaGenomeConfig():
         self.v_head_dim = v_head_dim if v_head_dim is not None else (num_channels // 12)*2          # (must be kept even for RoPE)
         self.pair_channels = pair_channels if pair_channels is not None else num_channels // 6
         self.pair_heads = pair_heads
-        default_pos_channels = max(1, (self.input_seq_len // 2048) - 1) * 2
-        self.pos_channels = pos_channels if pos_channels is not None else default_pos_channels
+        self.pos_channels = pos_channels
         self.transformer_mlp_ratio = transformer_mlp_ratio
         self.init_scale = init_scale
         self.embedder_mlp_ratio = embedder_mlp_ratio
@@ -85,9 +88,10 @@ class AlphaGenomeConfig():
         if isinstance(metadata, dict):
             metadata = Metadata(metadata)
         self.metadata = metadata
-        self.num_splice_sites = num_splice_sites if num_splice_sites is not None else input_seq_len // 2048
+        self.num_splice_sites = num_splice_sites if num_splice_sites is not None else self.max_seq_len // 2048
         self.splice_site_channels = splice_site_channels if splice_site_channels is not None else num_channels
         self.splice_site_threshold = splice_site_threshold
+        self.min_zero_multinomial_loss = min_zero_multinomial_loss
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -134,7 +138,7 @@ class AlphaGenome(nn.Module):
         self.num_channels = cfg.num_channels                                                                    # C
         self.channel_increment = cfg.channel_increment                                                          # I
         self.transformer_layers = cfg.transformer_layers
-        self.input_seq_len = cfg.input_seq_len                                                                  # S
+        self.max_seq_len = cfg.max_seq_len                                                                  # S
         self.first_conv_width = cfg.first_conv_width
         self.block_width = cfg.block_width
         self.num_q_heads = cfg.num_q_heads                                                                      # H_q
@@ -151,6 +155,7 @@ class AlphaGenome(nn.Module):
         self.num_splice_sites = cfg.num_splice_sites
         self.splice_site_channels = cfg.splice_site_channels
         self.splice_site_threshold = cfg.splice_site_threshold
+        self.min_zero_multinomial_loss = cfg.min_zero_multinomial_loss
 
         # Read the metadata (make class if in dict form)
         if isinstance(cfg.metadata, dict):
@@ -165,17 +170,14 @@ class AlphaGenome(nn.Module):
         self.pair_downsample_width = 16
 
         # Check inputs
-        assert self.input_seq_len >= (self.encoder_downsample_width**self.stages) * self.pair_downsample_width, \
-            "Input sequence length must be at least (encoder_downsample_width^(stages) * pair_downsample_width)."
-        assert self.input_seq_len % ((self.encoder_downsample_width**self.stages) * self.pair_downsample_width) == 0, \
-            "Input sequence length must be divisible by (encoder_downsample_width^(stages) * pair_downsample_width)."
+        self.check_seq_len(self.max_seq_len)
         assert (self.qk_head_dim % 2) == 0, "qk_head_dim must be even for RoPE."
         assert (self.v_head_dim % 2) == 0, "v_head_dim must be even for RoPE."
         assert (self.num_q_heads % self.num_kv_heads) == 0, "num_q_heads must be divisible by num_kv_heads."
 
         # Define sizes throughout the model
         self.channel_sizes = [4] + [self.num_channels + self.channel_increment * i for i in range(self.stages)]     # [4, C, C+I, ..., C+(S-1)I]
-        self.transformer_seq_len = self.input_seq_len // (self.encoder_downsample_width ** self.stages)             # S'
+        self.transformer_max_seq_len = self.max_seq_len // (self.encoder_downsample_width ** self.stages)             # S'
 
         # Modules
         self.encoder = SequenceEncoder(
@@ -187,7 +189,7 @@ class AlphaGenome(nn.Module):
         self.org_embedder = nn.Embedding(self.num_organisms, self.channel_sizes[-1])
         self.transformer = TransformerTower(
             num_channels=self.channel_sizes[-1],
-            transformer_seq_len=self.transformer_seq_len,
+            transformer_seq_len=self.transformer_max_seq_len,
             num_blocks=self.transformer_layers,
             num_q_heads=self.num_q_heads,
             num_kv_heads=self.num_kv_heads,
@@ -226,13 +228,30 @@ class AlphaGenome(nn.Module):
             channels_pair=self.pair_channels,
         )
         self._heads = create_heads(
-            input_seq_len=self.input_seq_len,
+            max_seq_len=self.max_seq_len,
             channels=self.channels,
             splice_site_channels=self.splice_site_channels,
-            metadata=self.metadata
+            min_zero_multinomial_loss=self.min_zero_multinomial_loss,
+            metadata=self.metadata,
         )
 
-
+    def check_seq_len(self, seq_len: int):
+        min_seq_len = (self.encoder_downsample_width**self.stages) * self.pair_downsample_width
+        if seq_len < min_seq_len:
+            raise ValueError(
+                "Input sequence length must be at least "
+                "(encoder_downsample_width^(stages) * pair_downsample_width)."
+            )
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"Input sequence length must be <= max_seq_len={self.max_seq_len}, got {seq_len}."
+            )
+        if seq_len % min_seq_len != 0:
+            raise ValueError(
+                "Input sequence length must be divisible by "
+                "(encoder_downsample_width^(stages) * pair_downsample_width)."
+            )
+    
     @property
     def _num_organisms(self) -> int:
         return self.metadata.get_num_organisms()
@@ -264,26 +283,30 @@ class AlphaGenome(nn.Module):
         B, S, _ = x.shape
         if organism_index is None:
             organism_index = torch.zeros(B, dtype=torch.long, device=x.device)          # [B]
+
+        # Check inputs
+        self.check_seq_len(S)
         
         # Encode sequence with CNN encoder
-        x = x.permute(0, 2, 1)                                                          # [B, 4, S]
+        x = rearrange(x, 'b v s -> b s v')                                              # [B, S, 4]
         t, intermediates = self.encoder(x)                                              # [B, 4, S] --> x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] for U-Net skip connections
 
         # Add organism embedding
         if self._num_organisms >= 1:
-            t = t + self.org_embedder(organism_index).unsqueeze(2)                      # [B, C', S'] + [B, C', 1] --> [B, C', S']
+            org_embed = self.org_embedder(organism_index)
+            t = add('b c s, b c -> b c s', t, org_embed)                                # [B, C', S'] + [B, C', 1] --> [B, C', S']
 
         # Transformer tower
-        t = t.permute(0, 2, 1)                                                          # [B, S', C']
+        t = rearrange(t, 'b c s -> b s c')                                              # [B, S', C']
         t, pair_activations = self.transformer(t)                                       # x: [B, S', C'] | pair_activations: [B, P, P, F]
-        t = t.permute(0, 2, 1)                                                          # [B, C', S']
+        t = rearrange(t, 'b s c -> b c s')                                              # [B, C', S']
 
         # Decode sequence with CNN decoder
         x = self.decoder(t, intermediates)                                              # x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] --> [B, C, S]
 
         # Output embedders
-        t = t.permute(0, 2, 1)                                                          # [B, S', C']
-        x = x.permute(0, 2, 1)                                                          # [B, S, C]
+        t = rearrange(t, 'b c s -> b s c')                                              # [B, S', C']
+        x = rearrange(x, 'b c s -> b s c')                                              # [B, S, C]
         embeddings_t = self.embedder_t(t, organism_index)                               # [B, S', C'*M']
         embeddings_x = self.embedder_x(x, organism_index, skip_x=embeddings_t)          # [B, S, C'*M']
         embeddings_pair = self.embedder_pair(pair_activations, organism_index)          # [B, P, P, F]

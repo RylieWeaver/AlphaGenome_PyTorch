@@ -30,7 +30,7 @@ def test_enabled_flag_skips_disabled_heads():
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = make_organism_index(batch_size, num_organisms=2)
 
     atac = make_poisson_tracks(heads["atac"]["means"], organism_index, seq_len)
@@ -51,4 +51,3 @@ def test_enabled_flag_skips_disabled_heads():
     assert "atac" in predictions
     assert "rna_seq" not in predictions
     assert all(not key.startswith("rna_seq_") for key in scalars)
-

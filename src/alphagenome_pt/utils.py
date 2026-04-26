@@ -60,7 +60,7 @@ def _pad_dim(x: torch.Tensor, n: int, dim=-1, value=0.0):
     return x
 
 
-class EMA_RMSBatchNorm(nn.Module):
+class RMSBatchNorm(nn.Module):
     """
     RMS 'BatchNorm' (no mean subtraction):
       y = (x / sqrt(mean_square(x) + eps)) * gamma + beta
@@ -76,7 +76,7 @@ class EMA_RMSBatchNorm(nn.Module):
     NOTE: Future versions may add an argument for distributed 
     reduction across devices while maintaining grads.
     """
-    def __init__(self, num_channels, channels_dim=2, eps=1e-6, decay=0.9):
+    def __init__(self, num_channels, channels_dim=-1, eps=1e-6, decay=0.9):
         super().__init__()
         self.num_channels = num_channels
         self.channels_dim = channels_dim
@@ -103,8 +103,40 @@ class EMA_RMSBatchNorm(nn.Module):
 
         # Apply normalization
         rms = torch.sqrt(var + self.eps)
-        stats_shape = (1,) * (channels_dim) + (-1,) + (1,) * (x.ndim - channels_dim - 1)  # shape for broadcasting (1 on all dims except channels_dim)
+        stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
         y = (x / rms.view(stats_shape)) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
+        return y
+    
+
+class RMSLayerNorm(nn.Module):
+    """
+    RMS 'LayerNorm' (no mean subtraction):
+      y = (x / sqrt(mean_square(x) + eps)) * gamma + beta
+    
+    This function is shape-agnostic. For example:
+    - x: [B, C, S], set channels_dim=1
+    - x: [B, S, C], set channels_dim=2
+    - x: [B, S, S, C], set channels_dim=3
+    """
+    def __init__(self, num_channels, channels_dim=-1, eps=1e-6):
+        super().__init__()
+        self.num_channels = num_channels
+        self.channels_dim = channels_dim
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.zeros(num_channels))
+        self.beta = nn.Parameter(torch.zeros(num_channels))
+
+    def forward(self, x):
+        # Make sure channels_dim is valid
+        channels_dim = self.channels_dim % x.ndim
+        
+        # Compute stats
+        var = torch.square(x).mean(dim=channels_dim, keepdim=True)
+        rms = torch.sqrt(var + self.eps)
+
+        # Apply normalization
+        stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
+        y = (x / rms) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
         return y
 
 
@@ -145,14 +177,19 @@ class StandardizedConv1d(nn.Module):
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, width=5):
         super().__init__()
-        self.norm = EMA_RMSBatchNorm(in_channels, channels_dim=1)
+        self.norm = RMSBatchNorm(in_channels, channels_dim=1)
         self.act = GELU_1702()
+        self.is_pointwise_linear = width == 1
         if width == 1:
-            self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=width, padding=width // 2)  # equivalent to nn.Linear() but expects channels first shape
+            self.conv = nn.Linear(in_channels, out_channels)
         else:
             self.conv = StandardizedConv1d(in_channels, out_channels, kernel_size=width)
 
     def forward(self, x):       # [B, C_in, S]
         x = self.norm(x)        # [B, C_in, S]
         x = self.act(x)         # [B, C_in, S]
-        return self.conv(x)     # [B, C_out, S]
+        if self.is_pointwise_linear:
+            x = x.transpose(1, 2)        # [B, S, C_in]
+            x = self.conv(x)             # [B, S, C_out]
+            return x.transpose(1, 2)     # [B, C_out, S]
+        return self.conv(x)              # [B, C_out, S]

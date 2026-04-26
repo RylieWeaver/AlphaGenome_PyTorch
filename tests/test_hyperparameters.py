@@ -53,7 +53,7 @@ def test_hyperparameter_smoke(cfg_overrides: dict):
     model = build_small_model(metadata, **cfg_overrides)
 
     batch_size = 1
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = torch.zeros(batch_size, dtype=torch.long)
     labels = torch.randint(0, 5, (batch_size, seq_len), dtype=torch.long)
     batch = DataBatch(
@@ -86,7 +86,7 @@ def test_config_save_load_roundtrip(tmp_path):
         organisms=("human",),
     )
     cfg = AlphaGenomeConfig(
-        input_seq_len=2048,
+        max_seq_len=2048,
         num_channels=80,
         channel_increment=10,
         transformer_layers=2,
@@ -104,7 +104,7 @@ def test_config_save_load_roundtrip(tmp_path):
     cfg.save(cfg_path, metadata_path)
     loaded = AlphaGenomeConfig.load(cfg_path, metadata_path)
 
-    assert loaded.input_seq_len == cfg.input_seq_len
+    assert loaded.max_seq_len == cfg.max_seq_len
     assert loaded.num_channels == cfg.num_channels
     assert loaded.channel_increment == cfg.channel_increment
     assert loaded.transformer_layers == cfg.transformer_layers
@@ -131,7 +131,7 @@ def test_config_save_load_allows_model_reconstruction(tmp_path):
         organisms=("human",),
     )
     cfg = AlphaGenomeConfig(
-        input_seq_len=2048,
+        max_seq_len=2048,
         num_channels=64,
         transformer_layers=1,
         metadata=metadata,
@@ -144,7 +144,7 @@ def test_config_save_load_allows_model_reconstruction(tmp_path):
     model = AlphaGenome(loaded_cfg)
 
     batch_size = 1
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = torch.zeros(batch_size, dtype=torch.long)
     labels = torch.randint(0, 5, (batch_size, seq_len), dtype=torch.long)
     batch = DataBatch(

@@ -21,7 +21,7 @@ def test_contact_maps_head():
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     pair_len = seq_len // 2048
     organism_index = make_organism_index(batch_size, num_organisms=2)
 
@@ -43,4 +43,3 @@ def test_contact_maps_head():
     assert_finite_scalars(scalars)
     assert "contact_maps" in predictions
     assert predictions["contact_maps"]["predictions"].shape == contact_maps.shape
-

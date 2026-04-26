@@ -37,7 +37,7 @@ def test_individual_genome_track_head(head_name: str, num_tracks: list[int], res
     model = build_small_model(metadata)
 
     batch_size = 2
-    seq_len = model.input_seq_len
+    seq_len = model.max_seq_len
     organism_index = make_organism_index(batch_size, num_organisms=2)
 
     target_len = seq_len if resolution == 1 else seq_len // resolution
@@ -61,3 +61,16 @@ def test_individual_genome_track_head(head_name: str, num_tracks: list[int], res
     assert head_name in predictions
     assert predictions[head_name][f"scaled_predictions_{resolution}bp"].shape == tracks.shape
 
+
+def test_min_zero_multinomial_loss_config_reaches_genome_track_head():
+    metadata = build_metadata(
+        {
+            "rna_seq": {
+                "num_tracks": [2, 2],
+                "means": make_means([2, 2]),
+            }
+        }
+    )
+    model = build_small_model(metadata, min_zero_multinomial_loss=False)
+
+    assert model._heads["rna_seq"]._min_zero_multinomial_loss is False

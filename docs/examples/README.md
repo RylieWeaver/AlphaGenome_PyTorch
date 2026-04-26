@@ -14,6 +14,7 @@ It's meant to be barebones and hackable so that you can start modifying to your 
 python train_mlm.py
 python train_downstream.py
 python train_downstream_from_pretrained_mlm.py
+python train_downstream_from_hf_checkpoint.py
 ```
 
 

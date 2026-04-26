@@ -13,6 +13,7 @@ dependencies = [
   "torch>=2.0",
   "numpy>=1.22",
   "einops>=0.6",
+  "einx>=0.3",
 ]
 description = "An implementation of AlphaGenome in PyTorch."
 keywords = [
@@ -37,6 +38,9 @@ license-files = ["LICEN[CS]E*"]
 [project.optional-dependencies]
 dev = [
   "pytest>=7",
+]
+hub = [
+  "huggingface_hub>=0.20",
 ]
 
 [project.urls]

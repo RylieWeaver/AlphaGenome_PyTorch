@@ -7,7 +7,7 @@
 # Torch
 import torch
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, reduce
 
 # AlphaGenome
 
@@ -49,9 +49,11 @@ def multinomial_loss(
     *,
     y_true: torch.Tensor,                   # [..., S, C]
     y_pred: torch.Tensor,                   # [..., S, C]
-    mask: torch.Tensor,                     # [..., 1, C]
+    mask: torch.Tensor,                     # [..., #S, C]
     multinomial_resolution: int,
     positional_weight: float,
+    min_zero: bool = True,
+    eps: float = 1e-7,
 ) -> dict[str, torch.Tensor]:
     """Returns sum of multinomial losses and Poison loss on total count."""
     assert y_true.shape == y_pred.shape, "Shapes of y_true, y_pred and mask must be equal."
@@ -60,8 +62,13 @@ def multinomial_loss(
             f'{y_pred.shape[-2]=} must be divisible by {multinomial_resolution=}.'
         )
 
+    # Setup
     *extra_dims, S, C = y_pred.shape
-    num_segments = S // multinomial_resolution                                  # N = S // R
+    S_sub = multinomial_resolution
+    dtype = torch.float32
+    y_true = y_true.to(dtype)
+    y_pred = y_pred.to(dtype)
+    mask = mask.to(dtype)
 
     # Remove the masked out bins from the totals sum
     y_true = torch.clamp(y_true, min=0) * mask                                  # [..., S, C]
@@ -70,43 +77,41 @@ def multinomial_loss(
     y_pred = y_pred * mask                                                      # [..., S, C]
 
     # Split sequence into n sub-sequences of size multinomial_resolution
-    y_true = rearrange(y_true, '... (n s) c -> ... n s c', n=num_segments)      # [..., N, R, C]
-    y_pred = rearrange(y_pred, '... (n s) c -> ... n s c', n=num_segments)      # [..., N, R, C]
+    y_pred = rearrange(y_pred, '... (n s) c -> ... n s c', s=S_sub)     # [..., S_sub, R, C]
+    y_true = rearrange(y_true, '... (n s) c -> ... n s c', s=S_sub)     # [..., S_sub, R, C]
 
-
-    total_pred = torch.sum(y_pred, dim=-2, keepdim=True)                        # [..., N, 1, C]
-    total_true = torch.sum(y_true, dim=-2, keepdim=True)                        # [..., N, 1, C]
+    # Pooled pred/true counts
+    total_pred = reduce(y_pred, '... n s c -> ... n 1 c', 'sum')        # [..., S_sub, 1, C]
+    total_true = reduce(y_true, '... n s c -> ... n 1 c', 'sum')        # [..., S_sub, 1, C]
     mask = mask[..., None, :]  # broadcast over segments
 
+    # Poisson loss
     loss_total_count = poisson_loss(
-        y_true=total_true,
         y_pred=total_pred,
+        y_true=total_true,
         mask=mask,
-    )                                                                           # [1]
-    # Poisson loss is O(n) wrt multinomial resolution so we
-    # normalize to be invariant to multinomial_resolution
-    loss_total_count /= multinomial_resolution                                  # [1]
+    )
+    ## NOTE: Poisson loss is O(n) wrt resolution so
+    ## we normalize to be invariant to resolution
+    loss_total_count /= multinomial_resolution
 
-    eps = 1e-7
-    prob_predictions = y_pred.to(torch.float32) / (total_pred + eps)            # [..., N, R, C]
-    prob_targets = y_true.to(torch.float32) / (total_true + eps)                # [..., N, 1, C]
-    loss_positional = -y_true * torch.log(prob_predictions + eps)               # [..., N, R, C]
-    loss_positional = _safe_masked_mean(loss_positional, mask=mask)             # [1]
-    
-    # NOTE: the above implementation has a loss floor above zero.
-    # Adding a shifted version of the loss to the predictions dict.
-    min_value = -y_true * torch.log(prob_targets + eps)                         # [..., N, 1, C]
-    zero_loss_positional = loss_positional - min_value
-    zero_loss_positional = _safe_masked_mean(zero_loss_positional, mask=mask)   # [1]
+    # Positional loss
+    prob_predictions = y_pred / (total_pred + eps)                          # [..., N, R, C]
+    loss_pos = -y_true * torch.log(prob_predictions + eps)                  # [..., N, R, C]
+    # NOTE: positional loss has a min value that we can account for
+    prob_targets = y_true / (total_true + eps)                              # [..., N, 1, C]
+    min_value = -y_true * torch.log(prob_targets + eps)                     # [..., N, R, C]
+    zero_loss_pos = loss_pos - min_value                                    # [..., N, R, C]
+
+    loss_pos = _safe_masked_mean(loss_pos, mask)                  # [1]
+    zero_loss_pos = _safe_masked_mean(zero_loss_pos, mask)        # [1]
+    loss = zero_loss_pos if min_zero else loss_pos
     
     return {
-        'loss': loss_total_count + positional_weight * loss_positional,
+        'loss': loss_total_count + positional_weight * loss,
         'loss_total': loss_total_count,
-        'loss_positional': loss_positional,
-        'loss_positional_zero_floor': zero_loss_positional,
-        'max_sum_preds': torch.max(total_pred),
-        'max_preds': torch.max(y_pred),
-        'max_targets': torch.max(y_true.to(torch.float32)),
+        'loss_positional': loss_pos,
+        'zero_loss_positional': zero_loss_pos,
     }
 
 

@@ -25,12 +25,12 @@ if __name__ == "__main__":
     }
 
     # Define the model
-    model_cfg = AlphaGenomeConfig(input_seq_len=2048, num_channels=96, metadata=metadata)
+    model_cfg = AlphaGenomeConfig(max_seq_len=2048*8, num_channels=96, metadata=metadata)
     model = AlphaGenome(model_cfg).to(device)
     # print(model)
 
     # Get synthetic data parameters from model/metadata
-    S = model.input_seq_len
+    S = model.max_seq_len
 
     # Define the synthetic data
     ## DNA
