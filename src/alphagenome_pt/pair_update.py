@@ -67,7 +67,7 @@ def relative_shift(x):
 
 
 class SequenceToPairBlock(nn.Module):
-    def __init__(self, num_channels, pair_channels, max_pair_seq_len, pair_downsample_width, pair_heads, pos_channels, dropout):
+    def __init__(self, num_channels, pair_channels, max_pair_seq_len, pair_downsample_width, pair_heads, pos_channels, dropout, sync_bn=True):
         super().__init__()
         # Read inputs
         self.num_channels = num_channels                        # C'
@@ -76,6 +76,7 @@ class SequenceToPairBlock(nn.Module):
         self.pair_downsample_width = pair_downsample_width      # W_p
         self.pair_heads = pair_heads                            # H_p
         self.dropout = dropout
+        self.sync_bn = sync_bn
 
         # Make pos_channels even
         if pos_channels % 2 != 0:
@@ -147,11 +148,12 @@ class RowAttentionBlock(nn.Module):
     Input/Output: [B, P, P, F]
       - For each row i, attend across columns j∈[0..P-1].
     """
-    def __init__(self, pair_channels, dropout):
+    def __init__(self, pair_channels, dropout, sync_bn=True):
         super().__init__()
         # Read inputs
         self.pair_channels = pair_channels      # F
         self.dropout = dropout
+        self.sync_bn = sync_bn
 
         # Normalization
         self.norm = RMSLayerNorm(self.pair_channels, channels_dim=3)
@@ -191,12 +193,13 @@ class RowAttentionBlock(nn.Module):
 
 
 class PairMLPBlock(nn.Module):
-    def __init__(self, pair_channels, mlp_ratio, dropout=0.0):
+    def __init__(self, pair_channels, mlp_ratio, dropout=0.0, sync_bn=True):
         super().__init__()
         # Read inputs
         self.pair_channels = pair_channels      # F
         self.mlp_ratio = mlp_ratio              # M
         self.dropout = dropout
+        self.sync_bn = sync_bn
 
         # Modules
         self.norm = RMSLayerNorm(self.pair_channels, channels_dim=3)
@@ -215,7 +218,7 @@ class PairMLPBlock(nn.Module):
 
 
 class PairUpdateBlock(nn.Module):
-    def __init__(self, num_channels, pair_downsample_width, max_pair_seq_len, pair_channels, pos_channels, pair_heads, mlp_ratio, dropout):
+    def __init__(self, num_channels, pair_downsample_width, max_pair_seq_len, pair_channels, pos_channels, pair_heads, mlp_ratio, dropout, sync_bn=True):
         super().__init__()
         # Read inputs
         self.num_channels = num_channels                        # C'
@@ -226,6 +229,7 @@ class PairUpdateBlock(nn.Module):
         self.pos_channels = pos_channels                        # C_p
         self.mlp_ratio = mlp_ratio                              # M
         self.dropout = dropout
+        self.sync_bn = sync_bn
 
         # Modules
         self.sequence_to_pair_block = SequenceToPairBlock(
@@ -235,16 +239,19 @@ class PairUpdateBlock(nn.Module):
             pair_downsample_width=self.pair_downsample_width,
             pair_heads=self.pair_heads,
             pos_channels=self.pos_channels,
-            dropout=self.dropout
+            dropout=self.dropout,
+            sync_bn=self.sync_bn
         )
         self.row_attn_block = RowAttentionBlock(
             pair_channels=self.pair_channels,
-            dropout=self.dropout
+            dropout=self.dropout,
+            sync_bn=self.sync_bn
         )
         self.pair_mlp_block = PairMLPBlock(
             pair_channels=self.pair_channels,
             mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout
+            dropout=self.dropout,
+            sync_bn=self.sync_bn
         )
 
     def forward(self, sequence_input, pair_input):                               # [B, S', C'] | [B, P, P, F]

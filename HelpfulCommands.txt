@@ -1,0 +1,39 @@
+
+### Publish Package ###
+# 0. Move to package directory
+cd */AlphaGenome_PyTorch
+
+# 1. Update version in pyproject.toml
+# e.g. version = "0.1.0"
+
+# 2. Clean old builds
+rm -rf dist/ build/ *.egg-info
+
+# 3. Build source distribution + wheel
+# Option A: without adding build tools to the project
+uvx --from build pyproject-build
+
+# Option B: if build is already in your dev dependencies
+# uv run python -m build
+
+# 4. Optional: sanity check
+uvx twine check dist/*
+
+# 5. Upload to TestPyPI and Test Install
+uvx twine upload --repository testpypi dist/*
+uv pip install --index-url https://test.pypi.org/simple/ alphagenome-pt
+
+# 6. Upload to PyPI and Test Install
+uvx twine upload --verbose dist/*
+# username: __token__
+# password: pypi-...
+uv pip install alphagenome-pt
+
+# Notes:
+Sometimes copying past API token doesn't work... maybe because of copy-paste weirdness.
+It's brute force but as a last resort can just create a new one.
+
+
+### Run Tests ###
+pytest tests
+torchrun --nproc_per_node=2 -m pytest tests/test_bn_grad.py -q

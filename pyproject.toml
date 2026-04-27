@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "alphagenome_pt"
-version = "0.0.4"
+version = "0.1.1"
 authors = [
   { name="Rylie Weaver", email="rylieweaver9@gmail.com" },
   { name="John Lagergren", email="lagergrenjh@ornl.gov" }

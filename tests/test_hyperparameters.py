@@ -96,6 +96,7 @@ def test_config_save_load_roundtrip(tmp_path):
         v_head_dim=20,
         pair_channels=16,
         pair_heads=8,
+        sync_bn=False,
         metadata=metadata,
     )
 
@@ -114,6 +115,7 @@ def test_config_save_load_roundtrip(tmp_path):
     assert loaded.v_head_dim == cfg.v_head_dim
     assert loaded.pair_channels == cfg.pair_channels
     assert loaded.pair_heads == cfg.pair_heads
+    assert loaded.sync_bn == cfg.sync_bn
     assert loaded.metadata.get_heads() == cfg.metadata.get_heads()
     assert torch.equal(
         loaded.metadata.metadata["heads"]["rna_seq"]["means"],

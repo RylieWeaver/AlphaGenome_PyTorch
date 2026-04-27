@@ -15,16 +15,17 @@ from .utils import ConvBlock
 
 
 class UpResBlock(nn.Module):
-    def __init__(self, num_channels, skip_channels, width=5, init_scale=0.9):
+    def __init__(self, num_channels, skip_channels, width=5, init_scale=0.9, sync_bn=True):
         super().__init__()
         self.num_channels = num_channels
         self.skip_channels = skip_channels
         self.width = width
         self.init_scale = init_scale
-        self.block1 = ConvBlock(num_channels, skip_channels, width=width)
+        self.sync_bn = sync_bn
+        self.block1 = ConvBlock(num_channels, skip_channels, width=width, sync_bn=self.sync_bn)
         self.residual_scale = nn.Parameter(torch.tensor([init_scale]))
-        self.block2 = ConvBlock(skip_channels, skip_channels, width=1)
-        self.block3 = ConvBlock(skip_channels, skip_channels, width=width)
+        self.block2 = ConvBlock(skip_channels, skip_channels, width=1, sync_bn=self.sync_bn)
+        self.block3 = ConvBlock(skip_channels, skip_channels, width=width, sync_bn=self.sync_bn)
 
     def forward(self, x, unet_skip_x):                                      # [B, C, S], [B, C_skip, S]
         _, C_skip, _ = unet_skip_x.shape
@@ -39,7 +40,8 @@ class SequenceDecoder(nn.Module):
     def __init__(self,
         channel_sizes,
         block_width=5,
-        init_scale=0.9
+        init_scale=0.9,
+        sync_bn=True
     ):
         super().__init__()
         self.stages = len(channel_sizes) - 1
@@ -47,6 +49,7 @@ class SequenceDecoder(nn.Module):
         self.bin_sizes = [2**i for i in range(self.stages)][::-1]  # reverse for decoding
         self.block_width = block_width
         self.init_scale = init_scale
+        self.sync_bn = sync_bn
 
         self.upres_blocks = nn.ModuleDict()
         for i in range(self.stages):
@@ -54,7 +57,8 @@ class SequenceDecoder(nn.Module):
                 num_channels=self.channel_sizes[max(i-1, 0)],
                 skip_channels=self.channel_sizes[i],
                 width=block_width,
-                init_scale=init_scale
+                init_scale=init_scale,
+                sync_bn=self.sync_bn
             )
 
     def forward(self, x, intermediates):        # x: [B, C', S'] | intermediates: dict that contains x_intermediate: [B, C_i, S_i] for U-Net skip connections

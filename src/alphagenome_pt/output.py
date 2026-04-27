@@ -15,7 +15,7 @@ from .utils import RMSBatchNorm, RMSLayerNorm, GELU_1702
 
 
 class OutputEmbedder(nn.Module):
-    def __init__(self, num_channels, num_organisms, mlp_ratio, skip_channels=None):
+    def __init__(self, num_channels, num_organisms, mlp_ratio, skip_channels=None, sync_bn=True):
         super().__init__()
         # Read inputs
         self.num_channels = num_channels
@@ -23,12 +23,13 @@ class OutputEmbedder(nn.Module):
         self.up_channels = num_channels * mlp_ratio
         self.skip_channels = skip_channels
         self.num_organisms = num_organisms
+        self.sync_bn = sync_bn
 
         # Modules
         self.fc1 = nn.Linear(self.num_channels, self.up_channels)
         self.fc_skip = nn.Linear(self.skip_channels, self.up_channels, bias=False) if self.skip_channels is not None else None
         self.org = nn.Embedding(self.num_organisms, self.up_channels)
-        self.norm = RMSBatchNorm(self.up_channels, channels_dim=2)
+        self.norm = RMSBatchNorm(self.up_channels, sync=self.sync_bn, channels_dim=2)
         self.activation = GELU_1702()
 
 

@@ -91,6 +91,7 @@ class MHA(nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         dropout: float,
+        sync_bn: bool = True,
     ):
         """
         Grouped-Query Attention (GQA):
@@ -113,10 +114,11 @@ class MHA(nn.Module):
         self.max_transformer_seq_len = max_transformer_seq_len      # S'
         self.logit_clip_value = 5.0
         self.dropout = dropout
+        self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
         # Initial normalization
-        self.bn1 = RMSBatchNorm(self.num_channels)
+        self.bn1 = RMSBatchNorm(self.num_channels, sync=self.sync_bn)
 
         # Q/K/V modules
         self.q_proj = nn.Linear(self.num_channels, self.num_q_heads * self.qk_head_dim, bias=False)
@@ -127,7 +129,7 @@ class MHA(nn.Module):
         self.v_norm = nn.LayerNorm(self.v_head_dim)
 
         # Output modules
-        self.bn2 = RMSBatchNorm(self.num_channels, channels_dim=2)
+        self.bn2 = RMSBatchNorm(self.num_channels, sync=self.sync_bn, channels_dim=2)
         self.out_lin = nn.Linear(self.num_q_heads * self.v_head_dim, self.num_channels, bias=True)
         self.out_drop = nn.Dropout(self.dropout)
 
@@ -178,20 +180,21 @@ class MHA(nn.Module):
 
 
 class MLPBlock(nn.Module):
-    def __init__(self, num_channels, mlp_ratio, dropout):
+    def __init__(self, num_channels, mlp_ratio, dropout, sync_bn=True):
         super().__init__()
         # Read inputs
         self.num_channels = num_channels        # C'
         self.mlp_ratio = mlp_ratio              # M
         self.dropout = dropout
+        self.sync_bn = sync_bn
 
         # Modules
-        self.bn1 = RMSBatchNorm(self.num_channels)
+        self.bn1 = RMSBatchNorm(self.num_channels, sync=self.sync_bn)
         self.fc1 = nn.Linear(self.num_channels, self.num_channels * self.mlp_ratio)
         self.act = nn.ReLU()
         self.drop1 = nn.Dropout(self.dropout)
         self.fc2 = nn.Linear(self.num_channels * self.mlp_ratio, self.num_channels)
-        self.bn2 = RMSBatchNorm(self.num_channels)
+        self.bn2 = RMSBatchNorm(self.num_channels, sync=self.sync_bn)
         self.drop2 = nn.Dropout(self.dropout)
 
     def forward(self, x):       # [B, S, C]
@@ -206,14 +209,15 @@ class MLPBlock(nn.Module):
 
 
 class AttentionBias(nn.Module):
-    def __init__(self, pair_channels, pair_downsample_width, num_q_heads, num_kv_heads):
+    def __init__(self, pair_channels, pair_downsample_width, num_q_heads, num_kv_heads, sync_bn=True):
         super().__init__()
         self.pair_channels = pair_channels                                              # F
         self.pair_downsample_width = pair_downsample_width                              # W_p
         self.num_q_heads = num_q_heads                                                  # H_q
         self.num_kv_heads = num_kv_heads                                                # H_kv
         self.head_group_size = num_q_heads // num_kv_heads                              # G = H_q // H_kv
-        self.bn = RMSBatchNorm(self.pair_channels, channels_dim=3)
+        self.sync_bn = sync_bn
+        self.bn = RMSBatchNorm(self.pair_channels, sync=self.sync_bn, channels_dim=3)
         self.act = nn.GELU()
         self.fc = nn.Linear(self.pair_channels, self.num_q_heads, bias=False)
 
@@ -246,6 +250,7 @@ class TransformerTowerBlock(nn.Module):
         pos_channels: int,
         mlp_ratio=2,
         dropout=0.0,
+        sync_bn=True,
     ):
         super().__init__()
         # Read and check inputs
@@ -263,6 +268,7 @@ class TransformerTowerBlock(nn.Module):
         self.pos_channels = pos_channels                        # C_p
         self.mlp_ratio = mlp_ratio                              # M
         self.dropout = dropout
+        self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
         # Modules
@@ -275,13 +281,15 @@ class TransformerTowerBlock(nn.Module):
                 pair_heads=self.pair_heads,
                 pos_channels=self.pos_channels,
                 mlp_ratio=self.mlp_ratio,
-                dropout=self.dropout
+                dropout=self.dropout,
+                sync_bn=self.sync_bn
             )
         self.attn_bias = AttentionBias(
             pair_channels=self.pair_channels,
             pair_downsample_width=self.pair_downsample_width,
             num_q_heads=self.num_q_heads,
-            num_kv_heads=self.num_kv_heads
+            num_kv_heads=self.num_kv_heads,
+            sync_bn=self.sync_bn
         )
         self.mha = MHA(
             self.num_channels,
@@ -290,12 +298,14 @@ class TransformerTowerBlock(nn.Module):
             self.num_kv_heads,
             self.qk_head_dim,
             self.v_head_dim,
-            self.dropout
+            self.dropout,
+            sync_bn=self.sync_bn
         )
         self.mlp = MLPBlock(
             num_channels=self.num_channels,
             mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout
+            dropout=self.dropout,
+            sync_bn=self.sync_bn
         )
 
     def forward(self, x, pair_x):                       # x: [B, S', C'] | pair_x: [B, P, P, F] or None
@@ -311,7 +321,7 @@ class TransformerTower(nn.Module):
     def __init__(
         self,
         num_channels: int,
-        transformer_seq_len: int,
+        max_transformer_seq_len: int,
         num_blocks: int,
         num_q_heads: int,
         num_kv_heads: int,
@@ -322,12 +332,13 @@ class TransformerTower(nn.Module):
         pair_heads: int,
         pos_channels: int,
         mlp_ratio: int,
-        dropout: float
+        dropout: float,
+        sync_bn: bool = True
     ):
         super().__init__()
         # Read and check inputs
         self.num_channels = num_channels                                                        # C'
-        self.max_transformer_seq_len = transformer_seq_len                                      # S'
+        self.max_transformer_seq_len = max_transformer_seq_len                                  # S'
         self.num_blocks = num_blocks                                                            # N
         self.num_q_heads = num_q_heads                                                          # H_q
         self.num_kv_heads = num_kv_heads                                                        # H_kv
@@ -340,6 +351,7 @@ class TransformerTower(nn.Module):
         self.pos_channels = pos_channels                                                        # C_p
         self.mlp_ratio = mlp_ratio                                                              # M
         self.dropout = dropout
+        self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
         # Define blocks
@@ -360,7 +372,8 @@ class TransformerTower(nn.Module):
                     pair_heads=self.pair_heads,
                     pos_channels=self.pos_channels,
                     mlp_ratio=self.mlp_ratio,
-                    dropout=self.dropout
+                    dropout=self.dropout,
+                    sync_bn=self.sync_bn
                 )
             )
 

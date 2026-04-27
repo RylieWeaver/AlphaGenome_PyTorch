@@ -14,14 +14,15 @@ from .utils import ConvBlock, _pad_dim
 
 
 class DNAEmbedder(nn.Module):
-    def __init__(self, in_channels, out_channels, first_conv_width=15, block_width=5):
+    def __init__(self, in_channels, out_channels, first_conv_width=15, block_width=5, sync_bn=True):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.first_conv_width = first_conv_width
         self.block_width = block_width
+        self.sync_bn = sync_bn
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=first_conv_width, padding=first_conv_width // 2)
-        self.conv_block = ConvBlock(out_channels, out_channels, width=block_width)
+        self.conv_block = ConvBlock(out_channels, out_channels, width=block_width, sync_bn=self.sync_bn)
 
     def forward(self, x):                       # [B, C_in, S]
         out = self.conv(x)                      # [B, C_out, S]
@@ -33,11 +34,12 @@ class DownResBlock(nn.Module):
     """
     It's expected that in_channels < out_channels.
     """
-    def __init__(self, in_channels, out_channels, width=5):
+    def __init__(self, in_channels, out_channels, width=5, sync_bn=True):
         super().__init__()
         self.out_channels = out_channels
-        self.conv_block1 = ConvBlock(in_channels, out_channels,  width=width)
-        self.conv_block2 = ConvBlock(out_channels, out_channels, width=width)
+        self.sync_bn = sync_bn
+        self.conv_block1 = ConvBlock(in_channels, out_channels,  width=width, sync_bn=self.sync_bn)
+        self.conv_block2 = ConvBlock(out_channels, out_channels, width=width, sync_bn=self.sync_bn)
 
     def forward(self, x):                               # [B, C_in, S]
         out = self.conv_block1(x)                       # [B, C_out, S]
@@ -56,7 +58,8 @@ class SequenceEncoder(nn.Module):
             channel_sizes,
             first_conv_width,
             encoder_downsample_width,
-            block_width
+            block_width,
+            sync_bn=True
         ):
         super().__init__()
         self.stages = len(channel_sizes) - 1
@@ -65,6 +68,7 @@ class SequenceEncoder(nn.Module):
         self.first_conv_width = first_conv_width
         self.encoder_downsample_width = encoder_downsample_width    # W_e
         self.block_width = block_width
+        self.sync_bn = sync_bn
 
         self.pool = Reduce('b c (s w) -> b c s', 'max', w=self.encoder_downsample_width)
         self.downres_blocks = nn.ModuleDict()
@@ -74,13 +78,15 @@ class SequenceEncoder(nn.Module):
                     in_channels=self.channel_sizes[i],
                     out_channels=self.channel_sizes[i+1],
                     first_conv_width=self.first_conv_width,
-                    block_width=self.block_width
+                    block_width=self.block_width,
+                    sync_bn=self.sync_bn
                 )
             else:
                 self.downres_blocks[f'bin_size_{self.bin_sizes[i]}'] = DownResBlock(
                     in_channels=self.channel_sizes[i],
                     out_channels=self.channel_sizes[i+1],
-                    width=self.block_width
+                    width=self.block_width,
+                    sync_bn=self.sync_bn
                 )
 
     def forward(self, x):                                           # [B, C_0, S]

@@ -60,6 +60,7 @@ class AlphaGenomeConfig():
         init_scale: float = 0.9,
         embedder_mlp_ratio: int = 2,
         dropout: float = 0.0,
+        sync_bn: bool = True,
         num_splice_sites: int = None,
         splice_site_channels: int = None,
         splice_site_threshold: float = 0.1,
@@ -85,6 +86,7 @@ class AlphaGenomeConfig():
         self.init_scale = init_scale
         self.embedder_mlp_ratio = embedder_mlp_ratio
         self.dropout = dropout
+        self.sync_bn = sync_bn
         if isinstance(metadata, dict):
             metadata = Metadata(metadata)
         self.metadata = metadata
@@ -152,6 +154,7 @@ class AlphaGenome(nn.Module):
         self.embedder_mlp_ratio = cfg.embedder_mlp_ratio                                                        # M'
         self.init_scale = cfg.init_scale
         self.dropout = cfg.dropout
+        self.sync_bn = cfg.sync_bn
         self.num_splice_sites = cfg.num_splice_sites
         self.splice_site_channels = cfg.splice_site_channels
         self.splice_site_threshold = cfg.splice_site_threshold
@@ -177,19 +180,20 @@ class AlphaGenome(nn.Module):
 
         # Define sizes throughout the model
         self.channel_sizes = [4] + [self.num_channels + self.channel_increment * i for i in range(self.stages)]     # [4, C, C+I, ..., C+(S-1)I]
-        self.transformer_max_seq_len = self.max_seq_len // (self.encoder_downsample_width ** self.stages)             # S'
+        self.max_transformer_max_seq_len = self.max_seq_len // (self.encoder_downsample_width ** self.stages)             # S'
 
         # Modules
         self.encoder = SequenceEncoder(
             channel_sizes=self.channel_sizes,
             first_conv_width=self.first_conv_width,
             encoder_downsample_width=self.encoder_downsample_width,
-            block_width=self.block_width
+            block_width=self.block_width,
+            sync_bn=self.sync_bn
         )
         self.org_embedder = nn.Embedding(self.num_organisms, self.channel_sizes[-1])
         self.transformer = TransformerTower(
             num_channels=self.channel_sizes[-1],
-            transformer_seq_len=self.transformer_max_seq_len,
+            max_transformer_seq_len=self.max_transformer_max_seq_len,
             num_blocks=self.transformer_layers,
             num_q_heads=self.num_q_heads,
             num_kv_heads=self.num_kv_heads,
@@ -200,23 +204,27 @@ class AlphaGenome(nn.Module):
             pair_heads=self.pair_heads,
             pos_channels=self.pos_channels,
             mlp_ratio=self.transformer_mlp_ratio,
-            dropout=self.dropout
+            dropout=self.dropout,
+            sync_bn=self.sync_bn
         )
         self.decoder = SequenceDecoder(
             channel_sizes=self.channel_sizes,
             block_width=self.block_width,
-            init_scale=self.init_scale
+            init_scale=self.init_scale,
+            sync_bn=self.sync_bn
         )
         self.embedder_t = OutputEmbedder(
             self.channel_sizes[-1],
             self.num_organisms,
             mlp_ratio=self.embedder_mlp_ratio,
+            sync_bn=self.sync_bn,
         )
         self.embedder_x = OutputEmbedder(
             self.channel_sizes[1],
             self.num_organisms,
             mlp_ratio=self.embedder_mlp_ratio,
-            skip_channels=self.channel_sizes[-1]*self.embedder_mlp_ratio
+            skip_channels=self.channel_sizes[-1]*self.embedder_mlp_ratio,
+            sync_bn=self.sync_bn,
         )
         self.embedder_pair = OutputPairEmbedder(
             pair_channels=self.pair_channels,
@@ -279,7 +287,7 @@ class AlphaGenome(nn.Module):
 
     def forward(self, batch: DataBatch, organism_index: torch.Tensor | None = None, return_embeddings: bool = True):
         # Unpack batch
-        x = batch.dna_sequence                                                          # [B, S, V]
+        x = batch.dna_sequence                                                          # [B, S, 4]
         B, S, _ = x.shape
         if organism_index is None:
             organism_index = torch.zeros(B, dtype=torch.long, device=x.device)          # [B]
@@ -288,7 +296,7 @@ class AlphaGenome(nn.Module):
         self.check_seq_len(S)
         
         # Encode sequence with CNN encoder
-        x = rearrange(x, 'b v s -> b s v')                                              # [B, S, 4]
+        x = rearrange(x, 'b s c -> b c s')                                              # [B, 4, S]
         t, intermediates = self.encoder(x)                                              # [B, 4, S] --> x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] for U-Net skip connections
 
         # Add organism embedding

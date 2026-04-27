@@ -10,6 +10,7 @@ from torch.nn import Module
 import torch.nn.functional as F
 
 # AlphaGenome
+from .distributed import is_dist, dist_sum
 
 
 
@@ -76,15 +77,27 @@ class RMSBatchNorm(nn.Module):
     NOTE: Future versions may add an argument for distributed 
     reduction across devices while maintaining grads.
     """
-    def __init__(self, num_channels, channels_dim=-1, eps=1e-6, decay=0.9):
+    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-6, decay=0.9):
         super().__init__()
         self.num_channels = num_channels
+        self.sync = sync
         self.channels_dim = channels_dim
         self.eps = eps
         self.decay = decay
         self.gamma = nn.Parameter(torch.zeros(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
         self.register_buffer("var_EMA", torch.ones(num_channels))
+
+    def _synced_var(self, x, reduce_dims):
+        if self.sync and is_dist():
+            sum_square = torch.square(x).sum(dim=reduce_dims)
+            count = torch.ones_like(x).sum(dim=reduce_dims)
+            sum_square = dist_sum(sum_square)
+            count = dist_sum(count)
+            var = (sum_square / count)
+        else:
+            var = torch.square(x).mean(dim=reduce_dims)
+        return var
 
     def forward(self, x):
         # Make sure channels_dim is valid
@@ -94,7 +107,10 @@ class RMSBatchNorm(nn.Module):
         if self.training:
             # reduce all but the channels dim
             reduce_dims = [i for i in range(x.ndim) if i != channels_dim]       # e.g. [0, 2] if channels_dim=1
-            var = torch.square(x).mean(dim=reduce_dims)                         # [C]: compute variance over all but the channels dim
+            if self.sync and is_dist():
+                var = self._synced_var(x, reduce_dims)
+            else:
+                var = torch.square(x).mean(dim=reduce_dims)                     # [C]: compute variance over all but the channels dim
             with torch.no_grad():
                 self.var_EMA.mul_(self.decay).add_((1 - self.decay) * var)      # update EMA with inplace operations
         # During inference, use the EMA of variance but don't update it.
@@ -102,11 +118,14 @@ class RMSBatchNorm(nn.Module):
             var = self.var_EMA
 
         # Apply normalization
+        if (var < 1e-4).any():
+            import warnings
+            warnings.warn(f"Low variance detected in EMA_RMSBatchNorm: var={var.min().item():.4e}")
         rms = torch.sqrt(var + self.eps)
         stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
         y = (x / rms.view(stats_shape)) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
         return y
-    
+
 
 class RMSLayerNorm(nn.Module):
     """
@@ -175,9 +194,10 @@ class StandardizedConv1d(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, width=5):
+    def __init__(self, in_channels, out_channels, width=5, sync_bn=True):
         super().__init__()
-        self.norm = RMSBatchNorm(in_channels, channels_dim=1)
+        self.sync_bn = sync_bn
+        self.norm = RMSBatchNorm(in_channels, sync=self.sync_bn, channels_dim=1)
         self.act = GELU_1702()
         self.is_pointwise_linear = width == 1
         if width == 1:
