@@ -78,7 +78,7 @@ class AlphaGenomeConfig():
         self.num_q_heads = num_q_heads
         self.num_kv_heads = num_kv_heads
         self.qk_head_dim = qk_head_dim if qk_head_dim is not None else (num_channels // 12)*2       # (must be kept even for RoPE)
-        self.v_head_dim = v_head_dim if v_head_dim is not None else (num_channels // 12)*2          # (must be kept even for RoPE)
+        self.v_head_dim = v_head_dim if v_head_dim is not None else (num_channels // 8)*2          # (must be kept even for RoPE)
         self.pair_channels = pair_channels if pair_channels is not None else num_channels // 6
         self.pair_heads = pair_heads
         self.pos_channels = pos_channels

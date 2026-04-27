@@ -10,7 +10,6 @@ from alphagenome_pt import (
     official_alphagenome_config,
     official_alphagenome_metadata,
 )
-import alphagenome_pt.checkpoint as checkpoint_module
 
 
 @pytest.mark.skipif(
@@ -31,6 +30,9 @@ class _ToyAlphaGenome(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.trunk = torch.nn.Linear(2, 2, bias=False)
+        self.org_embedder = torch.nn.Embedding(1, 2)
+        self.embedder_t = torch.nn.Module()
+        self.embedder_t.org = torch.nn.Embedding(1, 2)
         self._heads = torch.nn.ModuleDict({
             "toy": torch.nn.Linear(2, 1, bias=False)
         })
@@ -63,24 +65,31 @@ def test_load_alphagenome_checkpoint_skips_heads(tmp_path):
     assert load_result.unexpected_keys == []
 
 
-def test_load_alphagenome_checkpoint_downloads_when_missing(tmp_path, monkeypatch):
+def test_load_alphagenome_checkpoint_skips_organism_embeddings(tmp_path):
     model = _ToyAlphaGenome()
-    checkpoint = {"trunk.weight": torch.ones_like(model.trunk.weight)}
-    downloaded_path = tmp_path / DEFAULT_ALPHAGENOME_CHECKPOINT
-    torch.save(checkpoint, downloaded_path)
+    original_org_embedder = model.org_embedder.weight.detach().clone()
+    original_embedder_t_org = model.embedder_t.org.weight.detach().clone()
 
-    def fake_download(output_path, **kwargs):
-        return downloaded_path
+    checkpoint = {
+        "trunk.weight": torch.ones_like(model.trunk.weight),
+        "org_embedder.weight": torch.ones(2, 2),
+        "embedder_t.org.weight": torch.ones(2, 2),
+    }
+    checkpoint_path = tmp_path / DEFAULT_ALPHAGENOME_CHECKPOINT
+    torch.save(checkpoint, checkpoint_path)
 
-    monkeypatch.setattr(
-        checkpoint_module,
-        "download_alphagenome_checkpoint",
-        fake_download,
+    load_result = load_alphagenome_checkpoint(
+        model,
+        checkpoint_path,
+        organisms=False,
     )
 
-    load_alphagenome_checkpoint(model, tmp_path / "missing.pt", heads=False)
-
     assert torch.equal(model.trunk.weight, checkpoint["trunk.weight"])
+    assert torch.equal(model.org_embedder.weight, original_org_embedder)
+    assert torch.equal(model.embedder_t.org.weight, original_embedder_t_org)
+    assert "org_embedder.weight" not in load_result.missing_keys
+    assert "embedder_t.org.weight" not in load_result.missing_keys
+    assert load_result.unexpected_keys == []
 
 
 def test_official_alphagenome_config_accepts_custom_metadata():

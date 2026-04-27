@@ -137,6 +137,7 @@ def load_alphagenome_checkpoint(
     checkpoint_path: str | Path,
     *,
     heads: bool = False,
+    organisms: bool = True,
     repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
     filename: str = DEFAULT_ALPHAGENOME_CHECKPOINT,
     token: str | bool | None = None,
@@ -154,6 +155,8 @@ def load_alphagenome_checkpoint(
         checkpoint_path: Local checkpoint file path, or directory destination.
         heads: If False, skip all ``_heads.*`` tensors so users can load the
             official trunk with custom downstream heads.
+        organisms: If False, skip organism embedding tensors so users can load
+            the official trunk into models with different organism metadata.
         repo_id: Hugging Face Hub model repo ID.
         filename: File name in the Hub repo.
         token: Hugging Face auth token. If None, huggingface_hub uses env auth.
@@ -183,6 +186,7 @@ def load_alphagenome_checkpoint(
 
     state_dict = torch.load(resolved_checkpoint_path, map_location=map_location)
     skipped_head_keys: set[str] = set()
+    skipped_organism_keys: set[str] = set()
     if not heads:
         skipped_head_keys = {
             key
@@ -194,14 +198,33 @@ def load_alphagenome_checkpoint(
             for key, value in state_dict.items()
             if not key.startswith("_heads.")
         }
+    if not organisms:
+        skipped_organism_keys = {
+            key
+            for key in model.state_dict()
+            if _is_organism_embedding_key(key)
+        }
+        state_dict = {
+            key: value
+            for key, value in state_dict.items()
+            if not _is_organism_embedding_key(key)
+        }
 
     load_result = model.load_state_dict(state_dict, strict=False, assign=assign)
     missing_keys = [
         key
         for key in load_result.missing_keys
-        if key not in skipped_head_keys and not key.endswith("._track_means")
+        if (
+            key not in skipped_head_keys and
+            key not in skipped_organism_keys and
+            not key.endswith("._track_means")
+        )
     ]
     return CheckpointLoadResult(
         missing_keys=missing_keys,
         unexpected_keys=list(load_result.unexpected_keys),
     )
+
+
+def _is_organism_embedding_key(key: str) -> bool:
+    return key == "org_embedder.weight" or ".org." in key
