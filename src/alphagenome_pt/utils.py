@@ -77,7 +77,7 @@ class RMSBatchNorm(nn.Module):
     NOTE: Future versions may add an argument for distributed 
     reduction across devices while maintaining grads.
     """
-    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-6, decay=0.9):
+    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-5, decay=0.9):
         super().__init__()
         self.num_channels = num_channels
         self.sync = sync
@@ -137,7 +137,7 @@ class RMSLayerNorm(nn.Module):
     - x: [B, S, C], set channels_dim=2
     - x: [B, S, S, C], set channels_dim=3
     """
-    def __init__(self, num_channels, channels_dim=-1, eps=1e-6):
+    def __init__(self, num_channels, channels_dim=-1, eps=1e-5):
         super().__init__()
         self.num_channels = num_channels
         self.channels_dim = channels_dim
