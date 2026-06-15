@@ -84,7 +84,7 @@ class RMSBatchNorm(nn.Module):
         self.channels_dim = channels_dim
         self.eps = eps
         self.decay = decay
-        self.gamma = nn.Parameter(torch.zeros(num_channels))
+        self.gamma = nn.Parameter(torch.ones(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
         self.register_buffer("var_EMA", torch.ones(num_channels))
 
@@ -123,7 +123,7 @@ class RMSBatchNorm(nn.Module):
             warnings.warn(f"Low variance detected in EMA_RMSBatchNorm: var={var.min().item():.4e}")
         rms = torch.sqrt(var + self.eps)
         stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms.view(stats_shape)) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
+        y = (x / rms.view(stats_shape)) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
         return y
 
 
@@ -142,7 +142,7 @@ class RMSLayerNorm(nn.Module):
         self.num_channels = num_channels
         self.channels_dim = channels_dim
         self.eps = eps
-        self.gamma = nn.Parameter(torch.zeros(num_channels))
+        self.gamma = nn.Parameter(torch.ones(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
 
     def forward(self, x):
@@ -155,7 +155,7 @@ class RMSLayerNorm(nn.Module):
 
         # Apply normalization
         stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
+        y = (x / rms) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
         return y
 
 
