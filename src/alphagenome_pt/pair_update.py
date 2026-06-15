@@ -129,9 +129,9 @@ class SequenceToPairBlock(nn.Module):
             max_sequence_length=P, device=device, dtype=dtype
         )
         pos_encoding = self.pos_linear(pos_features).reshape(2*P, H, F)                                     # [2P, H_p, F]
-        rel_q_a = torch.einsum('bqhc,phc->bqph', q + self.q_r_bias, pos_encoding) / 2                       # [B, P, 2P, H_p]
+        rel_q_a = torch.einsum('bqhc,phc->bqph', q + self.q_r_bias, pos_encoding)                           # [B, P, 2P, H_p]
         rel_q_a = relative_shift(rel_q_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                           # [B, P, P, H_p]
-        rel_k_a = torch.einsum('bkhc,phc->bkph', k + self.k_r_bias, pos_encoding) / 2                       # [B, P, 2P, H_p]
+        rel_k_a = torch.einsum('bkhc,phc->bkph', k + self.k_r_bias, pos_encoding)                           # [B, P, 2P, H_p]
         rel_k_a = relative_shift(rel_k_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                           # [B, P, P, H_p]
         a = torch.einsum('bqhc,bkhc->bqkh', q, k) + 0.5*(rel_q_a + rel_k_a.transpose(1, 2))                 # [B, P, P, H_p]
 

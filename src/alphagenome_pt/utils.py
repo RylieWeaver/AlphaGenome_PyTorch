@@ -77,14 +77,14 @@ class RMSBatchNorm(nn.Module):
     NOTE: Future versions may add an argument for distributed 
     reduction across devices while maintaining grads.
     """
-    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-6, decay=0.9):
+    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-5, decay=0.9):
         super().__init__()
         self.num_channels = num_channels
         self.sync = sync
         self.channels_dim = channels_dim
         self.eps = eps
         self.decay = decay
-        self.gamma = nn.Parameter(torch.zeros(num_channels))
+        self.gamma = nn.Parameter(torch.ones(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
         self.register_buffer("var_EMA", torch.ones(num_channels))
 
@@ -123,7 +123,7 @@ class RMSBatchNorm(nn.Module):
             warnings.warn(f"Low variance detected in EMA_RMSBatchNorm: var={var.min().item():.4e}")
         rms = torch.sqrt(var + self.eps)
         stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms.view(stats_shape)) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
+        y = (x / rms.view(stats_shape)) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
         return y
 
 
@@ -137,12 +137,12 @@ class RMSLayerNorm(nn.Module):
     - x: [B, S, C], set channels_dim=2
     - x: [B, S, S, C], set channels_dim=3
     """
-    def __init__(self, num_channels, channels_dim=-1, eps=1e-6):
+    def __init__(self, num_channels, channels_dim=-1, eps=1e-5):
         super().__init__()
         self.num_channels = num_channels
         self.channels_dim = channels_dim
         self.eps = eps
-        self.gamma = nn.Parameter(torch.zeros(num_channels))
+        self.gamma = nn.Parameter(torch.ones(num_channels))
         self.beta = nn.Parameter(torch.zeros(num_channels))
 
     def forward(self, x):
@@ -155,7 +155,7 @@ class RMSLayerNorm(nn.Module):
 
         # Apply normalization
         stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms) * (1 + self.gamma.view(stats_shape)) + self.beta.view(stats_shape)
+        y = (x / rms) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
         return y
 
 
