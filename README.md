@@ -28,7 +28,7 @@ seq_encoder = SequenceEncoder()
 dna_sequence = seq_encoder.encode("".join(random.choices("ACGT", k=S)))
 data = DataBatch(dna_sequence=dna_sequence, organism_index=torch.tensor([0]))
 predictions, embeddings = model(data)
-print(embeddings.embeddings_1bp.shape, embeddings.embeddings_1bp.shape, embeddings.embeddings_pair.shape)
+print(embeddings.embeddings_1bp.shape, embeddings.embeddings_128bp.shape, embeddings.embeddings_pair.shape)
 ```
 
 ### Environment
