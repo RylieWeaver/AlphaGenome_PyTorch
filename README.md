@@ -31,6 +31,8 @@ predictions, embeddings = model(data)
 print(embeddings.embeddings_1bp.shape, embeddings.embeddings_128bp.shape, embeddings.embeddings_pair.shape)
 ```
 
+`organism_index` should be stored in the `DataBatch`; `AlphaGenome.forward()` reads it from the batch. If omitted, the model defaults all samples to organism index 0.
+
 ### Environment
 See `*/AlphaGenome_PyTorch/docs/environment` for instructions on how to set up a UV environment to run AlphaGenome_PyTorch.
 

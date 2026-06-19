@@ -21,6 +21,7 @@ Note that there does NOT need to be a correspondence between the tracks/tissues 
 
 ## Batch
 A `DataBatch` carries `dna_sequence`, `organism_index`, and whichever head targets/masks you are training on. Means are stored in the metadata, **not** the batch because they never vary by batch.
+`organism_index` should be stored in the `DataBatch`; `AlphaGenome.forward()` reads it from the batch. If omitted, the model defaults all samples to organism index 0.
 
 Shapes:
 - `dna_sequence`: `[B, S, 4]`
