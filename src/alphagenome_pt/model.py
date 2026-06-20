@@ -285,12 +285,14 @@ class AlphaGenome(nn.Module):
             tissue_mask=tissue_mask,
         )
 
-    def forward(self, batch: DataBatch, organism_index: torch.Tensor | None = None, return_embeddings: bool = True):
+    def forward(self, batch: DataBatch, return_embeddings: bool = True):
         # Unpack batch
         x = batch.dna_sequence                                                          # [B, S, 4]
         B, S, _ = x.shape
-        if organism_index is None:
+        if batch.organism_index is None:
             organism_index = torch.zeros(B, dtype=torch.long, device=x.device)          # [B]
+        else:
+            organism_index = batch.organism_index.to(device=x.device, dtype=torch.long)  # [B]
 
         # Check inputs
         self.check_seq_len(S)
@@ -376,7 +378,7 @@ class AlphaGenome(nn.Module):
             return predictions
 
     def loss(self, batch: DataBatch):
-        predictions, _ = self(batch, batch.get_organism_index())
+        predictions, _ = self(batch)
         total_loss, all_scalars = 0.0, {}
         for head_name, head_fn in self._heads.items():
             if not self.metadata.metadata['heads'][head_name].get("enabled", True):
