@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Imports""" 
-# General
+# External
 import numpy as np
 
-# Torch
 import torch
 import torch.nn as nn
-
-# AlphaGenome
 
 
 

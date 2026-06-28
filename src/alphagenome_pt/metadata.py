@@ -2,25 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Imports"""
-# General
+# External
 import json
 from typing import Union
 from pathlib import Path
 
-# Torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# AlphaGenome
 
 
 class Metadata():
     """
     Wraps a metadata dictionary with helper functions. The metadata dictionary MUST have the nested 
     structure of (organism/tasks --> head --> dict) where each head corresponds to a task/output type, namely: 
-        - [atac, dnase, procap, rna_seq, chip_tf, chip_histone, contact_maps, splice_sites_classification, 
-            splice_sites_usage, splice_sites_junction]
+        - [atac, dnase, procap, rna_seq, chip_tf, chip_histone, contact_maps,
+            splice_sites_classification, splice_sites_usage, splice_sites_junction]
 
     NOTE: The metadata dictionary requires "num_tracks" for all heads except
     "splice_sites_junction", which requires "num_tissues" instead.
@@ -30,20 +27,20 @@ class Metadata():
     - C: Number of channels
     - T: Number of tracks (or tissues for splice_sites_junction head)
 
-    The num_tracks field indicates how many tracks of data are available for each organism for that head. In 
-    the example below, there are 200 RNA-seq tracks for human and 150 for mouse, 100 CAGE tracks for human 
-    and 0 for mouse. The means field indicates the means for each track for each organism, which are used for
-    scaling the data in prediction (scaled = raw / mean). It must be padded to the maximum number of tracks 
-    across orgnanisms for that head (using 1.0 for padding is recommended because that will have no effect on 
-    scaling, however any mean value can be used because the loss is masked anyways). The track mask field is 
-    a boolean mask indicating which tracks are valid for each organism, which are used to mask out the loss. 
+    The num_tracks field indicates how many tracks of data are available for each organism for that head. In
+    the example below, there are 200 RNA-seq tracks for human and 150 for mouse, 100 CAGE tracks for human
+    and 0 for mouse. The means field is only needed for genome-track heads that scale predictions and targets
+    by per-track means. It must be padded to the maximum number of tracks across organisms for that head
+    (using 1.0 for padding is recommended because that will have no effect on scaling, however any mean value
+    can be used because the loss is masked anyways). The track mask field is a boolean mask indicating which
+    tracks are valid for each organism, which are used to mask out the loss.
     For example, if we have 200 RNA-seq tracks for human and 150 for mouse, then the last (200 - 150) = 50 
     entries of the track mask corresponding to mouse will be 0.
     
     Example metadata dictionary:
     {
         "organisms": ["human", "mouse"],
-        "tasks": {
+        "heads": {
             "rna_seq": {
                 "num_tracks": [200, 150],                               # [O]
                 "means": [[0.1, 0.05, ...], [...]],                     # [O, max(T_rna)]
@@ -56,7 +53,7 @@ class Metadata():
             },
             "splice_sites_junction": {
                 "num_tissues": [25, 25],                                # [O]
-                "means": [[0.3, 0.25, ...], [0.35, 0.3, ...]],  # [O, max(T_ss)]
+                "tissue_mask": [[1, 1, ...], [1, 1, ...]],              # [O, max(T_ss)]
             },
         },
     }
@@ -120,11 +117,15 @@ class Metadata():
             raise ValueError("Use get_num_tissues for splice_sites_junction head.")
         if head_name == "masked_language_modeling":
             raise ValueError("The masked_language_modeling head does not have num_tracks.")
+        if "track_mask" in self.metadata["heads"][head_name]:
+            return len(self.metadata["heads"][head_name]["track_mask"][0])
         return max(self.metadata["heads"][head_name]["num_tracks"])
     
     def get_num_tissues(self, head_name: str) -> int:
         if head_name != "splice_sites_junction":
             raise ValueError("get_num_tissues is only for splice_sites_junction head.")
+        if "tissue_mask" in self.metadata["heads"][head_name]:
+            return len(self.metadata["heads"][head_name]["tissue_mask"][0])
         return max(self.metadata["heads"][head_name]["num_tissues"])
 
     def get_means_organism(self, organism: Union[str, int], head_name: str) -> list[float]:
