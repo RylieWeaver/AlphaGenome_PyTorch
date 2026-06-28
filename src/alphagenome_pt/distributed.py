@@ -1,18 +1,15 @@
-# General
-
-# Torch
+# External
 import torch
 import torch.distributed as dist
-
-# AlphaGenome
-
 
 
 def is_dist():
     return dist.is_available() and dist.is_initialized()
 
+
 def is_rank0():
     return (not is_dist()) or dist.get_rank() == 0
+
 
 def dist_print(*args, **kwargs):
     if is_rank0():
@@ -20,10 +17,9 @@ def dist_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
-### Custom Distributed Sum ###
-# NOTE: Communicates grads in backprop
 def dist_sum(tensor):
     return _DistSum.apply(tensor)
+
 
 class _DistSum(torch.autograd.Function):
     @staticmethod
@@ -34,7 +30,6 @@ class _DistSum(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        g = grad_output.contiguous()
-        dist.all_reduce(g, op=dist.ReduceOp.SUM)
-        return g
-    
+        grad = grad_output.contiguous()
+        dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+        return grad

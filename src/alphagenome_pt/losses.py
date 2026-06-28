@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Imports"""
-# General
+# External
 
-# Torch
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
-
-# AlphaGenome
 
 
 
@@ -72,8 +69,6 @@ def multinomial_loss(
 
     # Remove the masked out bins from the totals sum
     y_true = torch.clamp(y_true, min=0) * mask                                  # [..., S, C]
-    y_pred = torch.clamp(y_pred, min=0) * mask                                  # [..., S, C]
-    mask = mask.to(y_pred.dtype)                                                # [..., S, C]
     y_pred = y_pred * mask                                                      # [..., S, C]
 
     # Split sequence into n sub-sequences of size multinomial_resolution

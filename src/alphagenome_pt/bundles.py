@@ -1,14 +1,9 @@
 # Provenance: PyTorch port of AlphaGenome (Google LLC) code (Apache-2.0). Modified by Rylie Weaver, 2026.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Imports"""
-# General
+# External
 import enum
-
-# Torch
 import torch
-
-# AlphaGenome
 
 
 
@@ -23,9 +18,9 @@ class BundleName(enum.Enum):
     CHIP_TF = 'chip_tf'
     CHIP_HISTONE = 'chip_histone'
     CONTACT_MAPS = 'contact_maps'
-    SPLICE_SITES_CLASSIFICATION = 'splice_sites'
-    SPLICE_SITES_USAGE = 'splice_site_usage'
-    SPLICE_SITES_JUNCTION = 'splice_junctions'
+    SPLICE_SITES_CLASSIFICATION = 'splice_sites_classification'
+    SPLICE_SITES_USAGE = 'splice_sites_usage'
+    SPLICE_SITES_JUNCTION = 'splice_sites_junction'
     SPLICE_SITES_POSITIONS = 'splice_site_positions'
 
     def get_dtypes(self) -> dict[str, torch.dtype]:

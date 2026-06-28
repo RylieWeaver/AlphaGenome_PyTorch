@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Imports"""
-# General
+# External
 from typing import Union
 from dataclasses import dataclass
 
-# Torch
 import torch
 
-# AlphaGenome
+# Internal
 from .metadata import Metadata
 from . import bundles
 
@@ -43,8 +42,8 @@ class DataBatch:
     splice_sites: torch.Tensor | None = None                    # [B, S, C_SPLICE_SITES]
     splice_site_usage: torch.Tensor | None = None               # [B, S, C_SPLICE_SITE_USAGE]
     splice_site_usage_mask: torch.Tensor | None = None          # [B, #S, C_SPLICE_SITE_USAGE]
-    splice_site_junction: torch.Tensor | None = None            # [B, D, A, C_SPLICE_SITE_junction]
-    splice_site_junction_mask: torch.Tensor | None = None       # [B, #D, #A, C_SPLICE_SITE_junction]
+    splice_junctions: torch.Tensor | None = None                # [B, D, A, C_SPLICE_JUNCTIONS]
+    splice_junctions_mask: torch.Tensor | None = None           # [B, #D, #A, C_SPLICE_JUNCTIONS]
 
     def get_organism_index(self) -> torch.Tensor:               # [B]
         """Returns the organism index data."""

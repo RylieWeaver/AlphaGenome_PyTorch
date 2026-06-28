@@ -1,19 +1,73 @@
 from __future__ import annotations
 
-# General
+# External
+import json
 from pathlib import Path
 from typing import Any, Mapping
 import numpy as np
-import sys
-
-# Torch
 import torch
 from torch import Tensor
 
-# JAX2PT
 
-JAX2PT_ROOT = Path(__file__).resolve().parent
-SRC_ROOT = JAX2PT_ROOT.parents[1]
+
+OUTPUT_HEADS = (
+    "atac",
+    "dnase",
+    "procap",
+    "cage",
+    "rna_seq",
+    "chip_tf",
+    "chip_histone",
+    "contact_maps",
+    "splice_sites",
+    "splice_site_usage",
+    "splice_junctions",
+)
+
+
+def _metadata_table_to_json(table: Any) -> dict[str, Any]:
+    if not hasattr(table, "to_json"):
+        raise TypeError(
+            "Expected a pandas-like metadata table that has a 'to_json' method, "
+            f"got {type(table)!r}"
+        )
+
+    return {
+        "num_rows": len(table),
+        "columns": [str(column) for column in table.columns],
+        "records": json.loads(table.to_json(orient="records")),
+    }
+
+
+def public_jax_metadata_to_json(
+    loaded: list[tuple[str, Any]] | None = None,
+) -> dict[str, Any]:
+    from .load import load_public_metadata
+
+    if loaded is None:
+        loaded = load_public_metadata()
+    return {
+        "organisms": {
+            organism_name: {
+                head_name: _metadata_table_to_json(
+                    get_output_metadata(metadata, head_name)
+                )
+                for head_name in OUTPUT_HEADS
+            }
+            for organism_name, metadata in loaded
+        }
+    }
+
+
+def get_output_metadata(jax_metadata: Any, attr_name: str) -> Any:
+    # NOTE: Can handle both jax_metadata[attr_name] and jax_metadata.attr_name
+    if isinstance(jax_metadata, Mapping):
+        if attr_name not in jax_metadata:
+            raise AttributeError(f"JAX metadata is missing output metadata: {attr_name}")
+        return jax_metadata[attr_name]
+    if not hasattr(jax_metadata, attr_name):
+        raise AttributeError(f"JAX metadata is missing output metadata: {attr_name}")
+    return getattr(jax_metadata, attr_name)
 
 
 def flatten_nested_dict(d: Mapping[str, Any], parent_key: str = "", sep: str = "/") -> dict[str, Any]:
@@ -33,6 +87,23 @@ def get_shape_and_dtype(arr: Any) -> dict[str, Any]:
     return {
         "shape": list(arr.shape),
         "dtype": str(arr.dtype),
+    }
+
+
+def summarize_params_and_state(
+    params: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return shape/dtype summaries for flat params and state mappings."""
+    return {
+        "params": {
+            key: get_shape_and_dtype(arr)
+            for key, arr in params.items()
+        },
+        "state": {
+            key: get_shape_and_dtype(arr)
+            for key, arr in state.items()
+        },
     }
 
 
@@ -72,69 +143,6 @@ def write_summary(mapping: dict[str, Any], output_path: Path) -> None:
 def print_summary(mapping: dict[str, Any]) -> None:
     """Print a human-readable summary of params/state keys, shapes, and dtypes."""
     print(summary_text(mapping), end="")
-
-
-def full_alphagenome_metadata() -> dict:
-    def head(num_tracks: int) -> dict:
-        return {
-            "num_tracks": [num_tracks, num_tracks],
-            "means": [[1.0] * num_tracks, [1.0] * num_tracks],
-        }
-
-    return {
-        "organisms": ["human", "mouse"],
-        "heads": {
-            "atac": head(256),
-            "dnase": head(384),
-            "procap": head(128),
-            "cage": head(640),
-            "rna_seq": head(768),
-            "chip_tf": head(1664),
-            "chip_histone": head(1152),
-            "contact_maps": head(28),
-            "splice_sites_classification": head(5),
-            "splice_sites_usage": head(734),
-            "splice_sites_junction": {
-                "num_tissues": [367, 367],
-                "means": [[1.0] * 367, [1.0] * 367],
-            },
-        },
-    }
-
-
-def full_alphagenome_config():
-    if str(SRC_ROOT) not in sys.path:
-        sys.path.insert(0, str(SRC_ROOT))
-
-    from alphagenome_pt.model import AlphaGenomeConfig
-
-    return AlphaGenomeConfig(
-        max_seq_len=1_048_576,
-        num_channels=768,
-        channel_increment=128,
-        transformer_layers=9,
-        num_q_heads=8,
-        num_kv_heads=1,
-        qk_head_dim=128,
-        v_head_dim=192,
-        pair_channels=128,
-        pair_heads=32,
-        pos_channels=64,
-        transformer_mlp_ratio=2,
-        embedder_mlp_ratio=2,
-        num_splice_sites=512,
-        splice_site_channels=768,
-        metadata=full_alphagenome_metadata(),
-    )
-
-
-def full_alphagenome_model():
-    if str(SRC_ROOT) not in sys.path:
-        sys.path.insert(0, str(SRC_ROOT))
-
-    from alphagenome_pt.model import AlphaGenome
-
-    return AlphaGenome(full_alphagenome_config())
 
 
 def jax_to_torch_tensor(arr: Any) -> Tensor:
