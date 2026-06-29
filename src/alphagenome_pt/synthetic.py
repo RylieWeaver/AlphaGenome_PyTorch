@@ -125,11 +125,14 @@ def _synthetic_head_names(heads: Sequence[HeadName] | None) -> tuple[HeadName, .
     if heads is None:
         return ()
 
-    selected = set(heads)
+    selected = list(dict.fromkeys(heads))
     
     # NOTE: SPLICE_SITES_JUNCTION requires SPLICE_SITES_CLASSIFICATION
-    if HeadName.SPLICE_SITES_JUNCTION in selected:
-        selected.add(HeadName.SPLICE_SITES_CLASSIFICATION)
+    if (
+        HeadName.SPLICE_SITES_JUNCTION in selected
+        and HeadName.SPLICE_SITES_CLASSIFICATION not in selected
+    ):
+        selected.append(HeadName.SPLICE_SITES_CLASSIFICATION)
     return tuple(selected)
 
 
