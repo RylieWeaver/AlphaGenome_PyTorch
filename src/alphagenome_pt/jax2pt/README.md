@@ -47,7 +47,7 @@ The converted state dict contains only persistent checkpoint tensors. Metadata-d
 ## Testing
 
 ```bash
-pytest -s tests/test_mappings.py
+pytest -s tests/test_mapping_metadata.py tests/test_mapping_state.py
 ```
 
 
