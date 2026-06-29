@@ -284,12 +284,15 @@ def synthetic_splice_junctions(
 
 
 def synthetic_batch(
-    metadata: Metadata,
+    metadata: Metadata | None = None,
     *,
     batch_size: int = 2,
     seq_len: int = 8192,
     num_splice_sites: int = 2,
 ) -> DataBatch:
+    if metadata is None:
+        metadata = synthetic_metadata(heads=tuple(HeadName))
+
     organism_index = synthetic_organism_index(
         batch_size,
         num_organisms=metadata.get_num_organisms(),
