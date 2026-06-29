@@ -4,38 +4,24 @@ Inspect the full PyTorch AlphaGenome model and write param/state keys and shapes
 
 from __future__ import annotations
 
-# General
+# External
 import argparse
 from pathlib import Path
-from typing import Any
 
-# Torch
-import torch
+# Internal
+from alphagenome_pt import deepmind_model
+from .utils import summarize_params_and_state, write_summary
 
-# JAX2PT
-from utils import full_alphagenome_model, get_shape_and_dtype, write_summary
-
-
-
-def inspect_model(model: torch.nn.Module) -> dict[str, Any]:
-    """Generate a mapping of all parameter and state keys with their shapes."""
-    result = {
-        "params": {},
-        "state": {},
-    }
-
-    for key, tensor in model.named_parameters():
-        result["params"][key] = get_shape_and_dtype(tensor)
-
-    for key, tensor in model.named_buffers():
-        result["state"][key] = get_shape_and_dtype(tensor)
-
-    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Inspect full PyTorch AlphaGenome model and write all keys/shapes to text"
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Device to use for PyTorch model inspection. Defaults to CPU. Examples: cpu, gpu, cuda, mps.",
     )
     parser.add_argument(
         "--output",
@@ -46,8 +32,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model = full_alphagenome_model()
-    mapping = inspect_model(model)
+    model = deepmind_model(device=args.device)
+    params = dict(model.named_parameters())
+    state_dict = model.state_dict()
+    state = {
+        key: value
+        for key, value in state_dict.items()
+        if key not in params
+    }
+    mapping = summarize_params_and_state(
+        params=params,
+        state=state,
+    )
     write_summary(mapping, args.output)
 
 

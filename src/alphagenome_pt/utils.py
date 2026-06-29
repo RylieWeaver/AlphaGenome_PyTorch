@@ -1,215 +1,67 @@
-# Provenance: Reimplementation based on the AlphaGenome bioRxiv paper. Rylie Weaver, 2026.
-# SPDX-License-Identifier: Apache-2.0
+"""General package utilities."""
 
-# General
+from __future__ import annotations
 
-# Torch
-import torch
-import torch.nn as nn
-from torch.nn import Module
-import torch.nn.functional as F
+# External
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 
-# AlphaGenome
-from .distributed import is_dist, dist_sum
-
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
-class GELU_1702(Module):
-    # NOTE: AlphaGenome applies a custom scaled GELU
-    # in its conv blocks and output embeddings.
-    def forward(self, x):
-        return torch.sigmoid(1.702 * x) * x
+PACKAGE_DISTRIBUTION_NAME = "alphagenome-pt"
 
 
-def _pad_dim(x: torch.Tensor, n: int, dim=-1, value=0.0):
-    """
-    Pad tensor 'x' along 'dim' with 'value' to have the right size 'n'.
-    No-op if current size >= n.
-
-    Usage explanation:
-    - Convolutions usually expect a 'channels first' shape for input tensors,
-      (e.g. [B, C, S]), while other modules usually expect 'channels last' shape
-      (e.g. [B, S, C]). Therefore, in order to pad the number of channels (e.g. for
-      skip connections), it's helpful to have a flexible padding function that can 
-      pad along any dimension.
-
-    Example usage:
-    - x: [B, C, S], n: 1024, dim: 1 --> pads C to 1024
-    - x: [B, S, C], n: 1024, dim: -1 --> pads C to 1024
-    """
-    # Calculate the amount of padding needed
-    ndim = x.dim()
-    dim = dim % ndim
-    size = x.size(dim)
-    diff = n - size
-
-    # Return immediately if no padding is needed
-    if diff <= 0:
-        return x
-
-    # Move target dim to last
-    perm = list(range(ndim))                        # evaluates to [0, 1, 2, ..., dim, ..., ndim-1]
-    perm[dim], perm[-1] = perm[-1], perm[dim]       # evaluates to [0, 1, 2, ..., ndim-1, ..., dim]
-    x = x.permute(perm)                             # swap the target dim and last dim
-
-    # Do the padding
-    x = F.pad(x, (0, diff), mode="constant", value=value)
-
-    # Swap target dim and last dim back
-    x = x.permute(perm)
-
-    return x
+def _normalize_distribution_name(name: str) -> str:
+    return name.replace("_", "-").lower()
 
 
-class RMSBatchNorm(nn.Module):
-    """
-    RMS 'BatchNorm' (no mean subtraction):
-      y = (x / sqrt(mean_square(x) + eps)) * gamma + beta
-    - gamma, beta are learnable per-channel scale and shift.
-    - Tracks variance with an Exponential Moving Average (EMA)
-      during training, then freezes it for eval.
-    
-    This function is shape-agnostic. For example:
-    - x: [B, C, S], set channels_dim=1
-    - x: [B, S, C], set channels_dim=2
-    - x: [B, S, S, C], set channels_dim=3
+def project_root() -> Path | None:
+    # NOTE: This is hardcoded to the package layout:
+    #   repo_root/src/alphagenome_pt/utils.py
+    # We don't dynamically search because installed packages often live under
+    # another uv/project directory that can have an unrelated pyproject.toml.
+    root = Path(__file__).resolve().parents[2]
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
 
-    NOTE: Future versions may add an argument for distributed 
-    reduction across devices while maintaining grads.
-    """
-    def __init__(self, num_channels, sync=True, channels_dim=-1, eps=1e-5, decay=0.9):
-        super().__init__()
-        self.num_channels = num_channels
-        self.sync = sync
-        self.channels_dim = channels_dim
-        self.eps = eps
-        self.decay = decay
-        self.gamma = nn.Parameter(torch.ones(num_channels))
-        self.beta = nn.Parameter(torch.zeros(num_channels))
-        self.register_buffer("var_EMA", torch.ones(num_channels))
-
-    def _synced_var(self, x, reduce_dims):
-        if self.sync and is_dist():
-            sum_square = torch.square(x).sum(dim=reduce_dims)
-            count = torch.ones_like(x).sum(dim=reduce_dims)
-            sum_square = dist_sum(sum_square)
-            count = dist_sum(count)
-            var = (sum_square / count)
-        else:
-            var = torch.square(x).mean(dim=reduce_dims)
-        return var
-
-    def forward(self, x):
-        # Make sure channels_dim is valid
-        channels_dim = self.channels_dim % x.ndim
-        
-        # During training, update the EMA of variance but don't use it.
-        if self.training:
-            # reduce all but the channels dim
-            reduce_dims = [i for i in range(x.ndim) if i != channels_dim]       # e.g. [0, 2] if channels_dim=1
-            if self.sync and is_dist():
-                var = self._synced_var(x, reduce_dims)
-            else:
-                var = torch.square(x).mean(dim=reduce_dims)                     # [C]: compute variance over all but the channels dim
-            with torch.no_grad():
-                self.var_EMA.mul_(self.decay).add_((1 - self.decay) * var)      # update EMA with inplace operations
-        # During inference, use the EMA of variance but don't update it.
-        else:
-            var = self.var_EMA
-
-        # Apply normalization
-        if (var < 1e-4).any():
-            import warnings
-            warnings.warn(f"Low variance detected in EMA_RMSBatchNorm: var={var.min().item():.4e}")
-        rms = torch.sqrt(var + self.eps)
-        stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms.view(stats_shape)) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
-        return y
+    with pyproject.open("rb") as f:
+        project = tomllib.load(f).get("project", {})
+    if (
+        _normalize_distribution_name(project.get("name", ""))
+        != PACKAGE_DISTRIBUTION_NAME
+    ):
+        return None
+    return root
 
 
-class RMSLayerNorm(nn.Module):
-    """
-    RMS 'LayerNorm' (no mean subtraction):
-      y = (x / sqrt(mean_square(x) + eps)) * gamma + beta
-    
-    This function is shape-agnostic. For example:
-    - x: [B, C, S], set channels_dim=1
-    - x: [B, S, C], set channels_dim=2
-    - x: [B, S, S, C], set channels_dim=3
-    """
-    def __init__(self, num_channels, channels_dim=-1, eps=1e-5):
-        super().__init__()
-        self.num_channels = num_channels
-        self.channels_dim = channels_dim
-        self.eps = eps
-        self.gamma = nn.Parameter(torch.ones(num_channels))
-        self.beta = nn.Parameter(torch.zeros(num_channels))
+def project_metadata() -> dict | None:
+    root = project_root()
+    if root is None:
+        return None
 
-    def forward(self, x):
-        # Make sure channels_dim is valid
-        channels_dim = self.channels_dim % x.ndim
-        
-        # Compute stats
-        var = torch.square(x).mean(dim=channels_dim, keepdim=True)
-        rms = torch.sqrt(var + self.eps)
-
-        # Apply normalization
-        stats_shape = tuple(1 if i != channels_dim else self.num_channels for i in range(x.ndim))   # shape for broadcasting (1 on all dims except channels_dim)
-        y = (x / rms) * self.gamma.view(stats_shape) + self.beta.view(stats_shape)
-        return y
+    with (root / "pyproject.toml").open("rb") as f:
+        return tomllib.load(f)["project"]
 
 
-class StandardizedConv1d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-
-        # Initialization
-        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size))
-        self.scale = nn.Parameter(torch.ones(out_channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(out_channels))
-
-    def forward(self, x):                               # x: [B, C_in, S]
-        # Setup
-        fan_in = self.kernel_size * self.in_channels
-        w = self.weight
-
-        # Normalize weights
-        w = w - w.mean(dim=(1, 2), keepdim=True)        # [C_out, C_in, K]
-        var_w = w.var(dim=(1, 2), keepdim=True)         # [C_out, 1, 1]
-        w_scale = self.scale * torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
-        w_standardized = w * w_scale                    # [C_out, C_in, K]
-
-        # Apply conv1d with normalized weights
-        out = F.conv1d(
-            x,
-            w_standardized,
-            bias=self.bias,
-            stride=1,
-            padding=self.kernel_size // 2,
-        )                                               # [B, C_in, S] --> [B, C_out, S]
-        return out                                      # [B, C_out, S]
+def package_name() -> str:
+    project = project_metadata()
+    if project is not None:
+        return project["name"]
+    return PACKAGE_DISTRIBUTION_NAME
 
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, width=5, sync_bn=True):
-        super().__init__()
-        self.sync_bn = sync_bn
-        self.norm = RMSBatchNorm(in_channels, sync=self.sync_bn, channels_dim=1)
-        self.act = GELU_1702()
-        self.is_pointwise_linear = width == 1
-        if width == 1:
-            self.conv = nn.Linear(in_channels, out_channels)
-        else:
-            self.conv = StandardizedConv1d(in_channels, out_channels, kernel_size=width)
-
-    def forward(self, x):       # [B, C_in, S]
-        x = self.norm(x)        # [B, C_in, S]
-        x = self.act(x)         # [B, C_in, S]
-        if self.is_pointwise_linear:
-            x = x.transpose(1, 2)        # [B, S, C_in]
-            x = self.conv(x)             # [B, S, C_out]
-            return x.transpose(1, 2)     # [B, C_out, S]
-        return self.conv(x)              # [B, C_out, S]
+def package_version() -> str:
+    project = project_metadata()
+    if project is not None:
+        return project["version"]
+    try:
+        return importlib_metadata.version(PACKAGE_DISTRIBUTION_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        raise RuntimeError(
+            "Could not find installed package metadata or pyproject.toml."
+        )

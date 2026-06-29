@@ -5,9 +5,10 @@ cd */AlphaGenome_PyTorch
 
 # 1. Update version in pyproject.toml
 # e.g. version = "0.1.0"
+python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
 
 # 2. Clean old builds
-rm -rf dist/ build/ *.egg-info
+rm -rf dist/ build/ *.egg-info src/*.egg-info
 
 # 3. Build source distribution + wheel
 # Option A: without adding build tools to the project
@@ -18,10 +19,19 @@ uvx --from build pyproject-build
 
 # 4. Optional: sanity check
 uvx twine check dist/*
+python -m zipfile -l dist/*.whl | grep METADATA
+python -c "import zipfile, glob; wheel=glob.glob('dist/*.whl')[0]; metadata=[n for n in zipfile.ZipFile(wheel).namelist() if n.endswith('METADATA')][0]; print(zipfile.ZipFile(wheel).read(metadata).decode().splitlines()[:8])"
 
 # 5. Upload to TestPyPI and Test Install
 uvx twine upload --repository testpypi dist/*
-uv pip install --index-url https://test.pypi.org/simple/ alphagenome-pt
+uv pip install \
+  --reinstall \
+  --refresh \
+  --prerelease allow \
+  --index-strategy unsafe-best-match \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  "alphagenome-pt==0.3.0rc3"
 
 # 6. Upload to PyPI and Test Install
 uvx twine upload --verbose dist/*

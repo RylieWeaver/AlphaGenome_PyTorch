@@ -1,26 +1,69 @@
 # Environment Setup
-This README shows how to set up an environment to run AlphaGenome. This tutorial only covers setting up a UV environment as of now, although there should be a large amount of transferability to other dependency managers (e.g. Anaconda, pip).
 
-Choose one of the options below...
+Most users should install the Python package directly:
 
-## Run a Script
-You can also include arguments for the project and environment name (e.g. ./make_env.sh <project_name> <env_name> <directory> [python_version])
+```bash
+pip install alphagenome-pt
+```
+
+When working from a local checkout, install the package in editable mode from
+the repo root:
+
+```bash
+pip install -e .
+```
+
+The instructions below are primarily for development, source installs, or
+systems where you want a fully controlled local environment. They may change as
+the package and optional dependencies evolve.
+
+## Developer Setup With Script
+
+The helper script creates a `uv` environment and installs the core runtime
+dependencies. You can pass a project name, environment name, target directory,
+and Python version:
+
 ```bash
 cd */AlphaGenome_PyTorch/docs/environment
 chmod +x make_env.sh
-./make_env.sh
+./make_env.sh <project_name> <env_name> <directory> [python_version]
 ```
 
-## Do it Manually
+Example:
+
 ```bash
-Install uv if not already: curl -LsSf https://astral.sh/uv/install.sh | sh
+./make_env.sh AlphaGenome ag-env /path/to/workspace 3.12
+source /path/to/workspace/AlphaGenome/ag-env/bin/activate
+cd /path/to/AlphaGenome_PyTorch
+pip install -e ".[dev]"
+```
+
+## Developer Setup Manually
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv init AlphaGenome --bare --python 3.12
 cd AlphaGenome
 uv venv ag-env --python 3.12 --native-tls
 source ag-env/bin/activate
-uv pip install torch numpy einops huggingface_hub
+uv pip install torch numpy einops einx huggingface_hub
+cd /path/to/AlphaGenome_PyTorch
+pip install -e ".[dev]"
 ```
 
+For JAX-to-PyTorch checkpoint conversion tooling, install the optional extra:
+
+```bash
+pip install -e ".[jax2pt]"
+```
 
 ## Notes
-Consider running `export UV_CACHE_DIR=<large_disk_path>` before install. This avoids UV cache OOM/disk-full errors (especially helpful on computational systems where home directories have strict storage quotas).
+
+On systems with small home directories, consider setting `UV_CACHE_DIR` before
+installing dependencies:
+
+```bash
+export UV_CACHE_DIR=<large_disk_path>
+```
+
+This avoids UV cache disk-full errors on shared compute systems.

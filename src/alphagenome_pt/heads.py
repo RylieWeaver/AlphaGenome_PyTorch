@@ -2,20 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Imports"""
-# General
+# External
 import abc
 from collections.abc import Sequence
 import dataclasses
 import enum
 import math
 
-# Torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# AlphaGenome
-from .transformer import apply_rope
+# Internal
+from .attention import apply_rope
 from .metadata import Metadata
 from .schemas import Channels
 from . import bundles
@@ -67,6 +66,7 @@ class GenomeTracksHeadConfig(HeadConfig):
     max_seq_len: int
     num_tracks: int
     track_means: torch.Tensor   # [O, T]
+    track_mask: torch.Tensor    # [O, T]
     resolutions: Sequence[int]
     apply_squashing: bool
     bundle: str
@@ -76,16 +76,19 @@ class GenomeTracksHeadConfig(HeadConfig):
 @dataclasses.dataclass
 class ContactMapsHeadConfig(HeadConfig):
     num_tracks: int
+    track_mask: torch.Tensor
 
 
 @dataclasses.dataclass
 class SpliceSitesClassificationHeadConfig(HeadConfig):
     num_tracks: int
+    track_mask: torch.Tensor
 
 
 @dataclasses.dataclass
 class SpliceSitesUsageHeadConfig(HeadConfig):
     num_tracks: int
+    track_mask: torch.Tensor
 
 
 @dataclasses.dataclass
@@ -93,6 +96,7 @@ class SpliceSitesJunctionHeadConfig(HeadConfig):
     max_seq_len: int
     splice_site_channels: int
     num_tissues: int
+    tissue_mask: torch.Tensor
 
 
 @dataclasses.dataclass
@@ -136,6 +140,7 @@ def create_head(
                 max_seq_len=config.max_seq_len,
                 num_tracks=config.num_tracks,
                 track_means=config.track_means,
+                track_mask=config.track_mask,
                 resolutions=config.resolutions,
                 apply_squashing=config.apply_squashing,
                 bundle=config.bundle,
@@ -147,6 +152,7 @@ def create_head(
                 num_organisms=config.num_organisms,
                 channels=config.channels,
                 num_tracks=config.num_tracks,
+                track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_CLASSIFICATION:
             return SpliceSitesClassificationHead(
@@ -154,6 +160,7 @@ def create_head(
                 num_organisms=config.num_organisms,
                 channels=config.channels,
                 num_tracks=config.num_tracks,
+                track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_USAGE:
             return SpliceSitesUsageHead(
@@ -161,6 +168,7 @@ def create_head(
                 num_organisms=config.num_organisms,
                 channels=config.channels,
                 num_tracks=config.num_tracks,
+                track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_JUNCTION:
             return SpliceSitesJunctionHead(
@@ -170,6 +178,7 @@ def create_head(
                 max_seq_len=config.max_seq_len,
                 splice_site_channels=config.splice_site_channels,
                 num_tissues=config.num_tissues,
+                tissue_mask=config.tissue_mask,
             )
         case HeadType.MASKED_LANGUAGE_MODELING:
             return MaskedLanguageModelingHead(
@@ -196,6 +205,7 @@ def get_head_config(
         case HeadName.ATAC:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]s
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.ATAC.value,
@@ -204,6 +214,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.ATAC,
@@ -212,6 +223,7 @@ def get_head_config(
         case HeadName.DNASE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.DNASE.value,
@@ -220,6 +232,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.DNASE,
@@ -228,6 +241,7 @@ def get_head_config(
         case HeadName.PROCAP:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.PROCAP.value,
@@ -236,6 +250,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.PROCAP,
@@ -244,6 +259,7 @@ def get_head_config(
         case HeadName.CAGE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.CAGE.value,
@@ -252,6 +268,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[1, 128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CAGE,
@@ -260,6 +277,7 @@ def get_head_config(
         case HeadName.RNA_SEQ:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.RNA_SEQ.value,
@@ -268,6 +286,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[1, 128],
                 apply_squashing=True,
                 bundle=bundles.BundleName.RNA_SEQ,
@@ -276,6 +295,7 @@ def get_head_config(
         case HeadName.CHIP_TF:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.CHIP_TF.value,
@@ -284,6 +304,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CHIP_TF,
@@ -292,6 +313,7 @@ def get_head_config(
         case HeadName.CHIP_HISTONE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
             track_means = metadata.get_means(head_name.value)               # [O, T]
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return GenomeTracksHeadConfig(
                 type=HeadType.GENOME_TRACKS,
                 name=HeadName.CHIP_HISTONE.value,
@@ -300,6 +322,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 num_tracks=num_tracks,
                 track_means=track_means,
+                track_mask=track_mask,
                 resolutions=[128],
                 apply_squashing=False,
                 bundle=bundles.BundleName.CHIP_HISTONE,
@@ -307,33 +330,40 @@ def get_head_config(
             )
         case HeadName.CONTACT_MAPS:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return ContactMapsHeadConfig(
                 type=HeadType.CONTACT_MAPS,
                 name=HeadName.CONTACT_MAPS.value,
                 num_organisms=num_organisms,
                 channels=channels,
                 num_tracks=num_tracks,
+                track_mask=track_mask,
             )
         case HeadName.SPLICE_SITES_CLASSIFICATION:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return SpliceSitesClassificationHeadConfig(
                 type=HeadType.SPLICE_SITES_CLASSIFICATION,
                 name=HeadName.SPLICE_SITES_CLASSIFICATION.value,
                 num_organisms=num_organisms,
                 channels=channels,
                 num_tracks=num_tracks,
+                track_mask=track_mask,
             )
         case HeadName.SPLICE_SITES_USAGE:
             num_tracks = metadata.get_num_tracks(head_name.value)           # [1] (padded to be same across organisms)
+            track_mask = metadata.get_track_mask(head_name.value)           # [O, T]
             return SpliceSitesUsageHeadConfig(
                 type=HeadType.SPLICE_SITES_USAGE,
                 name=HeadName.SPLICE_SITES_USAGE.value,
                 num_organisms=num_organisms,
                 channels=channels,
                 num_tracks=num_tracks,
+                track_mask=track_mask,
             )
         case HeadName.SPLICE_SITES_JUNCTION:
             num_tissues = metadata.get_num_tissues(head_name.value)         # [1] (padded to be same across organisms)
+            tissue_mask = metadata.get_tissue_mask(head_name.value)         # [O, T]
             return SpliceSitesJunctionHeadConfig(
                 type=HeadType.SPLICE_SITES_JUNCTION,
                 name=HeadName.SPLICE_SITES_JUNCTION.value,
@@ -342,6 +372,7 @@ def get_head_config(
                 max_seq_len=max_seq_len,
                 splice_site_channels=splice_site_channels,
                 num_tissues=num_tissues,
+                tissue_mask=tissue_mask,
             )
         case HeadName.MASKED_LANGUAGE_MODELING:
             return MaskedLanguageModelingHeadConfig(
@@ -504,6 +535,42 @@ class Head(nn.Module, metaclass=abc.ABCMeta):
     ):
         """Returns the loss for the head."""
 
+    def _register_metadata_mask(
+        self,
+        name: str,
+        mask: torch.Tensor,
+    ) -> None:
+        self.register_buffer(
+            name,
+            torch.as_tensor(mask, dtype=torch.bool),
+            persistent=False,
+        )
+
+    def _metadata_mask_for_index(
+        self,
+        name: str,
+        organism_index: torch.Tensor,
+        ndim: int,
+    ) -> torch.Tensor:
+        mask = getattr(self, name)
+        mask = mask[organism_index.to(mask.device)]
+        return mask.reshape(mask.shape[0], *([1] * (ndim - 2)), mask.shape[-1])
+
+    def _combine_metadata_mask(
+        self,
+        mask: torch.Tensor | None,
+        *,
+        name: str,
+        organism_index: torch.Tensor,
+        ndim: int,
+    ) -> torch.Tensor:
+        # NOTE: Need to combine track masks with per-batch masks (e.g., from missing or padded data)
+        metadata_mask = self._metadata_mask_for_index(name, organism_index, ndim)
+        if mask is None:
+            return metadata_mask
+        metadata_mask = metadata_mask.to(mask.device)
+        return mask.to(torch.bool) & metadata_mask
+
 
 class GenomeTracksHead(Head):
     """A model head that predicts genome tracks at multiple resolutions.
@@ -522,6 +589,7 @@ class GenomeTracksHead(Head):
         max_seq_len: int,
         num_tracks: int,
         track_means: torch.Tensor,          # [O, T]
+        track_mask: torch.Tensor,           # [O, T]
         resolutions: Sequence[int],
         apply_squashing: bool,
         bundle: bundles.BundleName | None = None,
@@ -538,7 +606,12 @@ class GenomeTracksHead(Head):
             _track_means = track_means.detach().clone()
         else:
             _track_means = torch.as_tensor(track_means)
-        self.register_buffer("_track_means", _track_means.to(torch.float32))    # [O, T]
+        self.register_buffer(
+            "_track_means",
+            _track_means.to(torch.float32),
+            persistent=False,
+        )                                                                   # [O, T]
+        self._register_metadata_mask("_track_mask", track_mask)             # [O, T]
         self._resolutions = sorted(resolutions)
         self._apply_squashing = apply_squashing
         self._bundle = bundle
@@ -650,6 +723,12 @@ class GenomeTracksHead(Head):
             raise ValueError('Bundle is required for loss computation.')
         
         tracks, mask = batch.get_genome_tracks(self._bundle)
+        mask = self._combine_metadata_mask(
+            mask,
+            name="_track_mask",
+            organism_index=batch.get_organism_index(),
+            ndim=tracks.ndim,
+        )
         
         if mask.shape[-2] != 1:
             raise ValueError(
@@ -692,6 +771,7 @@ class ContactMapsHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
+        track_mask: torch.Tensor,
     ):
         super().__init__(
             name=name,
@@ -699,6 +779,7 @@ class ContactMapsHead(Head):
             channels=channels,
         )
         self._num_tracks = num_tracks
+        self._register_metadata_mask("_track_mask", track_mask)
         self.multiorg_linear = MultiOrganismLinear(
             in_channels=channels.channels_pair,
             out_channels=num_tracks,
@@ -740,6 +821,12 @@ class ContactMapsHead(Head):
 
         if (targets_mask := batch.contact_maps_mask) is None:
             targets_mask = torch.ones(B, 1, 1, T, dtype=torch.bool, device=device)
+        targets_mask = self._combine_metadata_mask(
+            targets_mask,
+            name="_track_mask",
+            organism_index=batch.get_organism_index(),
+            ndim=targets.ndim,
+        )
 
         contact_predictions = predictions['predictions']
         assert contact_predictions.shape == targets.shape, \
@@ -763,6 +850,7 @@ class SpliceSitesClassificationHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
+        track_mask: torch.Tensor,
     ):
         super().__init__(
             name=name,
@@ -770,6 +858,7 @@ class SpliceSitesClassificationHead(Head):
             channels=channels,
         )
         self._num_tracks = num_tracks
+        self._register_metadata_mask("_track_mask", track_mask)
         self.multiorg_linear = MultiOrganismLinear(
             in_channels=channels.get_num_channels(1),
             out_channels=num_tracks,
@@ -809,6 +898,12 @@ class SpliceSitesClassificationHead(Head):
                     'Predictions shape does not match targets shape.'
             
             classification_mask = torch.any(splice_sites.bool(), dim=-1, keepdim=True)
+            classification_mask = self._combine_metadata_mask(
+                classification_mask,
+                name="_track_mask",
+                organism_index=batch.get_organism_index(),
+                ndim=splice_sites.ndim,
+            )
             loss = losses.cross_entropy_loss_from_logits(
                 y_pred_logits=logits,
                 # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
@@ -830,6 +925,7 @@ class SpliceSitesUsageHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
+        track_mask: torch.Tensor,
     ):
         super().__init__(
             name=name,
@@ -837,6 +933,7 @@ class SpliceSitesUsageHead(Head):
             channels=channels,
         )
         self._num_tracks = num_tracks
+        self._register_metadata_mask("_track_mask", track_mask)
         self.multiorg_linear = MultiOrganismLinear(
             in_channels=channels.get_num_channels(1),
             out_channels=num_tracks,
@@ -876,6 +973,12 @@ class SpliceSitesUsageHead(Head):
             'Predictions shape does not match targets shape.'
         
         mask = batch.splice_site_usage_mask
+        mask = self._combine_metadata_mask(
+            mask,
+            name="_track_mask",
+            organism_index=batch.get_organism_index(),
+            ndim=splice_site_usage.ndim,
+        )
         loss = losses.binary_crossentropy_from_logits(
             y_pred=logits,
             y_true=torch.clamp(splice_site_usage.to(torch.float32), 1e-7, 1.0 - 1e-7),
@@ -896,6 +999,7 @@ class SpliceSitesJunctionHead(Head):
         max_seq_len: int,
         splice_site_channels: int,
         num_tissues: int,
+        tissue_mask: torch.Tensor,
     ):
         """Initializes the SpliceSitesJunctionHead module."""
         super().__init__(
@@ -905,6 +1009,7 @@ class SpliceSitesJunctionHead(Head):
         )
         self._num_tissues = num_tissues
         self._num_tracks = 2 * self._num_tissues
+        self._register_metadata_mask("_tissue_mask", tissue_mask)
         self._max_position_encoding_distance = max_seq_len
         self.in_channels = channels.get_num_channels(1)
         self._splice_site_channels = splice_site_channels
@@ -927,11 +1032,17 @@ class SpliceSitesJunctionHead(Head):
         x: torch.Tensor,                        # [B, S, C]
         splice_site_positions: torch.Tensor,    # [B, 4, P]
         organism_index: torch.Tensor,           # [B]
-        tissue_mask: torch.Tensor,              # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,       # [B, #A, #D, T]
     ) -> tuple[torch.Tensor, torch.Tensor]:     # both [B, D, A, 2*T]
         """Splice site junctions."""
         assert splice_site_positions.shape[1] == 4, \
             'splice_site_positions must have shape [B, 4, P] for 4 DNA base pairs.'
+        tissue_mask = self._combine_metadata_mask(
+            tissue_mask,
+            name="_tissue_mask",
+            organism_index=organism_index,
+            ndim=4,
+        )
         pos_donor_idx = splice_site_positions[:, 0, :]      # [B, D]
         pos_accept_idx = splice_site_positions[:, 1, :]     # [B, A]
         neg_donor_idx = splice_site_positions[:, 2, :]      # [B, D]
@@ -996,18 +1107,18 @@ class SpliceSitesJunctionHead(Head):
             * track_mask[:, :, :, self._num_tissues:]
         )                                                                       # [B, D, A, 2*T]
         
-        splice_site_junction_mask = torch.cat([pos_mask, neg_mask], dim=-1)     # [B, D, A, 2*T]
+        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)     # [B, D, A, 2*T]
         pred_counts = torch.cat([pos_counts, neg_counts], dim=-1)               # [B, D, A, 2*T]
         pred_counts = torch.where(
-            splice_site_junction_mask.bool(), pred_counts, 0
+            splice_junctions_mask.bool(), pred_counts, 0
         )
-        return pred_counts, splice_site_junction_mask
+        return pred_counts, splice_junctions_mask
     
     def forward(
         self,
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B]
-        tissue_mask: torch.Tensor,                      # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,               # [B, #A, #D, T]
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings."""
@@ -1016,12 +1127,12 @@ class SpliceSitesJunctionHead(Head):
                 'splice_site_positions is required for junctions predictions.'
             )
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
-        splice_site_junction, splice_junction_mask = self._forward(     # both [B, D, A, 2*T]
+        splice_junctions, splice_junction_mask = self._forward(     # both [B, D, A, 2*T]
            embeddings_1bp, splice_site_positions, 
            organism_index, tissue_mask
         )
         return {
-           'predictions': splice_site_junction,                         # [B, D, A, 2*T]
+           'predictions': splice_junctions,                         # [B, D, A, 2*T]
            'splice_site_positions': splice_site_positions,              # [B, 4, P]
            'splice_junction_mask': splice_junction_mask                 # [B, D, A, 2*T]
         }
@@ -1032,13 +1143,17 @@ class SpliceSitesJunctionHead(Head):
         batch: schemas.DataBatch,
     ) -> torch.Tensor:
         """Returns the loss for the head."""
-        if (count_target := batch.splice_site_junction) is None:
-            raise ValueError('splice_site_junction target not in batch.')
+        if (count_target := batch.splice_junctions) is None:
+            raise ValueError('splice_junctions target not in batch.')
 
         pred_pair = predictions['predictions']
         pairs_mask = predictions['splice_junction_mask']
-        mask = self._get_track_mask(batch.splice_site_junction_mask)
-        pairs_mask = pairs_mask * mask
+        if batch.splice_junctions_mask is not None:
+            mask = self._get_track_mask(batch.splice_junctions_mask)
+            pairs_mask = pairs_mask.to(torch.bool) & mask.to(
+                device=pairs_mask.device,
+                dtype=torch.bool,
+            )
         # Junctions shape is [B, D, A, 2*T]
 
         def _scale_junction_counts(counts):     # [B, D, A, 2*T]

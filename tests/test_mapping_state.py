@@ -1,21 +1,14 @@
-# General
-import sys
-from pathlib import Path
+# External
+import os
 from typing import Any
 
-# Torch
+import pytest
 import torch
 
-# Paths
-JAX2PT_ROOT = Path(__file__).resolve().parent
-SRC_ROOT = JAX2PT_ROOT.parents[1]
-if str(JAX2PT_ROOT) not in sys.path:
-    sys.path.insert(0, str(JAX2PT_ROOT))
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-
-from inspect_jax import load_jax_checkpoint
-from mapping import (
+# Internal
+from alphagenome_pt import deepmind_model
+from alphagenome_pt.jax2pt.load import load_jax_state
+from alphagenome_pt.jax2pt.mapping_state import (
     convert_flat_jax_to_torch,
     expected_torch_only_param_keys,
     expected_torch_only_keys,
@@ -25,15 +18,13 @@ from mapping import (
     mapped_param_keys,
     mapped_state_keys,
 )
-from utils import check_converted_shapes, flatten_nested_dict, full_alphagenome_model
+from alphagenome_pt.jax2pt.utils import check_converted_shapes, flatten_nested_dict
 
-# Commands
-# pytest -s test_mappings.py
 
 
 def flat_jax_checkpoint() -> tuple[dict[str, Any], dict[str, Any]]:
     print("Loading official JAX checkpoint...")
-    params, state = load_jax_checkpoint(use_gpu=False)
+    params, state = load_jax_state(device="cpu")
     print("Flattening official JAX checkpoint...")
     flat_params = flatten_nested_dict(params)
     flat_state = flatten_nested_dict(state)
@@ -43,7 +34,12 @@ def flat_jax_checkpoint() -> tuple[dict[str, Any], dict[str, Any]]:
 
 def flat_torch_checkpoint(model) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     params = dict(model.named_parameters())
-    state = dict(model.named_buffers())
+    state_dict = model.state_dict()
+    state = {
+        key: value
+        for key, value in state_dict.items()
+        if key not in params
+    }
     return params, state
 
 
@@ -78,9 +74,12 @@ def assert_no_key_differences(
     assert all(not keys for keys in diffs.values())
 
 
-# NOTE: Any function with "test_" prefix will be automatically run by pytest
+@pytest.mark.skipif(
+    os.environ.get("ALPHAGENOME_PT_RUN_JAX_MAPPING_TEST") != "1",
+    reason="Set ALPHAGENOME_PT_RUN_JAX_MAPPING_TEST=1 to download and compare the official JAX checkpoint.",
+)
 def test_official_jax_checkpoint_maps_to_torch_model():
-    torch_model = full_alphagenome_model()
+    torch_model = deepmind_model()
     jax_params, jax_state = flat_jax_checkpoint()
     torch_params, torch_state = flat_torch_checkpoint(torch_model)
     mapped_jax_params, mapped_jax_state = mapped_jax_checkpoint()
@@ -114,9 +113,19 @@ def test_official_jax_checkpoint_maps_to_torch_model():
 
     load_result = torch_model.load_state_dict(converted, strict=False, assign=True)
     unexpected = set(load_result.unexpected_keys)
+    missing_params = {
+        key: torch_params[key]
+        for key in load_result.missing_keys
+        if key in torch_params
+    }
+    missing_state = {
+        key: torch_state[key]
+        for key in load_result.missing_keys
+        if key in torch_state
+    }
     expected_missing = expected_torch_only_keys(
-        {},
-        {key: torch_checkpoint[key] for key in load_result.missing_keys},
+        missing_params,
+        missing_state,
     )
     missing = set(load_result.missing_keys) - expected_missing
     print(f"Unexpected keys when loading converted checkpoint: {unexpected}")

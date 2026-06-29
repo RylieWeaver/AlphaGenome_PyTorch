@@ -4,9 +4,10 @@ build-backend = "uv_build"
 
 [project]
 name = "alphagenome_pt"
-version = "0.1.2"
+version = "0.3.0"
 authors = [
   { name="Rylie Weaver", email="rylieweaver9@gmail.com" },
+  { name="Gomathi Lakshmanan", email="gomathi.l@hotmail.com" },
   { name="John Lagergren", email="lagergrenjh@ornl.gov" }
 ]
 dependencies = [
@@ -14,6 +15,8 @@ dependencies = [
   "numpy>=1.22",
   "einops>=0.6",
   "einx>=0.3",
+  "huggingface_hub>=0.20",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 description = "An implementation of AlphaGenome in PyTorch."
 keywords = [
@@ -39,9 +42,14 @@ license-files = ["LICEN[CS]E*"]
 dev = [
   "pytest>=7",
 ]
-hub = [
-  "huggingface_hub>=0.20",
+jax2pt = [
+  "alphagenome",
+  "jax",
+  "dm-haiku",
 ]
+
+[project.scripts]
+alphagenome-pt-download = "alphagenome_pt.cli.download:main"
 
 [project.urls]
 Homepage = "https://github.com/RylieWeaver/AlphaGenome_PyTorch"
