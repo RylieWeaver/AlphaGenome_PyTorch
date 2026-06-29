@@ -15,9 +15,9 @@
 
 ### From-Scratch
 ```python
-from alphagenome_pt import small_alphagenome, synthetic_batch, synthetic_metadata
-metadata = synthetic_metadata()
-model = small_alphagenome(metadata)
+from alphagenome_pt import deepmind_model
+
+model = deepmind_model()
 ```
 
 ### Finetuned
@@ -30,12 +30,18 @@ from alphagenome_pt import deepmind_model
 model = deepmind_model(load_state=True)
 ```
 
-### Get Embeddings
-```
-batch = synthetic_batch(metadata, batch_size=1, seq_len=model.max_seq_len)
+### Get Predictions/Embeddings
+```python
+from alphagenome_pt import synthetic_batch
+batch = synthetic_batch(model.metadata, batch_size=1, seq_len=model.max_seq_len)
 predictions, embeddings = model(batch)
 
-print(embeddings.embeddings_1bp.shape, embeddings.embeddings_128bp.shape, embeddings.embeddings_pair.shape)
+print(
+  embeddings.embeddings_1bp.shape,
+  embeddings.embeddings_128bp.shape,
+  embeddings.embeddings_pair.shape,
+)
+print(predictions.keys())
 ```
 
 For finetuning with custom downstream heads, build custom metadata:
