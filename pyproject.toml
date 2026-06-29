@@ -16,6 +16,7 @@ dependencies = [
   "einops>=0.6",
   "einx>=0.3",
   "huggingface_hub>=0.20",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 description = "An implementation of AlphaGenome in PyTorch."
 keywords = [

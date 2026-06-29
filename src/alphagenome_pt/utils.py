@@ -5,7 +5,11 @@ from __future__ import annotations
 # External
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 

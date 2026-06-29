@@ -39,7 +39,7 @@ Arguments:
 | `--all-checkpoints` | `flag` | off | Explicitly convert every supported checkpoint. This is also the default when `--fold` is omitted. |
 | `--jax-input-dir` | `path` | none | Local official JAX checkpoint directory. If set, it must contain checkpoint files named `alphagenome_all_folds.pt`, `alphagenome_fold_0.pt`, `alphagenome_fold_1.pt`, `alphagenome_fold_2.pt`, and `alphagenome_fold_3.pt`. |
 | `--torch-output-dir` | `path` | `.` | Directory where the converted checkpoint is written as `alphagenome_{fold_name}.pt`. |
-| `--device` | `str` | `cpu` | Device string for JAX checkpoint loading. Examples: `cpu`, `gpu`, `cuda`, `cuda:0`. |
+| `--device` | `str` | `cpu` | Device string for JAX checkpoint loading. Examples: `cpu`, `gpu`, `cuda`. |
 
 The converted state dict contains only persistent checkpoint tensors. Metadata-derived track means and masks are non-persistent model buffers built from metadata during model initialization.
 
