@@ -6,7 +6,7 @@ Normally, you should be able to get converted checkpoints from HuggingFace and n
 
 ## Install
 From this repository root, install the package in editable mode with the JAX
-conversion extra. This installs the `alphagenome-pt-*` CLI commands used below.
+conversion extra.
 
 ```bash
 pip install -e ".[jax2pt]"
@@ -25,13 +25,7 @@ python -m alphagenome_pt.jax2pt.convert_state
 
 
 ## Convert Checkpoint
-CLI form:
-
-```bash
-alphagenome-pt-convert-jax
-```
-
-Equivalent module form:
+Module form:
 
 ```bash
 python -m alphagenome_pt.jax2pt.convert_state
@@ -58,15 +52,6 @@ pytest -s tests/test_mappings.py
 
 
 ## Inspect Keys
-Installed CLI:
-
-```bash
-alphagenome-pt-inspect-jax
-alphagenome-pt-inspect-metadata
-alphagenome-pt-inspect-metadata-table
-alphagenome-pt-inspect-torch
-```
-
 Module form:
 
 ```bash
@@ -109,13 +94,7 @@ Torch inspect arguments:
 ## Export Public Metadata
 Export public JAX metadata into three files: raw metadata, converted loadable metadata, and a compact summary for inspection.
 
-CLI form:
-
-```bash
-alphagenome-pt-export-metadata
-```
-
-Equivalent module form:
+Module form:
 
 ```bash
 python -m alphagenome_pt.jax2pt.convert_metadata
@@ -132,12 +111,6 @@ Arguments:
 
 ## Upload Checkpoints to Hugging Face (For Maintainer)
 Helper for uploading converted checkpoints to Hugging Face:
-
-```bash
-alphagenome-pt-upload-hf --local-dir /path/to/checkpoints
-```
-
-Equivalent module form:
 
 ```bash
 python -m alphagenome_pt.jax2pt.hf_upload --local-dir /path/to/checkpoints

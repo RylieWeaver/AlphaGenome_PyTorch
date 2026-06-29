@@ -35,8 +35,8 @@ class BatchNorm(nn.Module):
     - x: [B, S, C], set channels_dim=2
     - x: [B, S, S, C], set channels_dim=3
 
-    NOTE: Future versions may add an argument for distributed 
-    reduction across devices while maintaining grads.
+    NOTE: With sync=True and initialized torch.distributed, statistics are
+    reduced across devices with gradients maintained through dist_sum.
 
     NOTE: 
     - Training: update the EMA stats but don't use them. 
@@ -106,10 +106,10 @@ class BatchNorm(nn.Module):
         else:
             var = self.var_EMA
 
-        # Warn low variance (can lead to instability)
-        if (var < 1e-4).any():
-            import warnings
-            warnings.warn(f"Low variance detected in BatchNorm: var={var.min().item():.4e}")
+        # # Warn low variance (can lead to instability)
+        # if (var < 1e-4).any():
+        #     import warnings
+        #     warnings.warn(f"Low variance detected in BatchNorm: var={var.min().item():.4e}")
 
         # Apply
         rms = torch.sqrt(var + self.eps)

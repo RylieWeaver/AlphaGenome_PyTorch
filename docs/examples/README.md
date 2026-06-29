@@ -2,8 +2,14 @@
 
 
 ## Setup
-(1) Have the necessary dependencies installed (see `*/AlphaGenome_PyTorch/docs/environment`) for details on setting up an environment.
-(2) Make sure AlphaGenome_PyTorch is in your Python path: `cd ../.. && export PYTHONPATH=$(pwd):$PYTHONPATH && cd docs/examples`
+From the repo root, install the local package in editable mode, then enter the
+examples directory:
+
+```bash
+cd */AlphaGenome_PyTorch
+pip install -e .
+cd docs/examples
+```
 
 
 ## Running
@@ -15,12 +21,4 @@ python train_mlm.py
 python train_downstream.py
 python train_downstream_from_pretrained_mlm.py
 python train_downstream_from_hf_checkpoint.py
-```
-
-
-## Optionally run tests
-```
-uv pip install pytest
-cd `*/AlphaGenome_PyTorch`
-pytest -q tests
 ```

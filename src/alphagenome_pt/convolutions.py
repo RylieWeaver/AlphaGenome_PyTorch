@@ -2,18 +2,24 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops.layers.torch import Reduce
 from einops import repeat
 
 # Internal
 from .layers import BatchNorm, GELU_1702
 
 
+
 def _pad_dim(x: torch.Tensor, n: int, dim=-1, value=0.0):
     if dim < 0:
         dim += x.ndim
+    if n < x.size(dim):
+        raise ValueError(
+            f"Cannot pad dimension {dim} from size {x.size(dim)} down to {n}."
+        )
+    if n == x.size(dim):
+        return x
     pad_shape = list(x.shape)
-    pad_shape[dim] = n
+    pad_shape[dim] = n - x.size(dim)
     pad = torch.full(pad_shape, value, dtype=x.dtype, device=x.device)
     return torch.cat([x, pad], dim=dim)
 

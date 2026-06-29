@@ -33,6 +33,7 @@ import json
 from pathlib import Path
 import shutil
 from typing import Literal, NamedTuple
+import warnings
 from huggingface_hub import hf_hub_download
 import torch
 from torch import nn
@@ -115,10 +116,12 @@ HeadIndexMap = Mapping[HeadIndex, HeadIndex]
 
 @dataclass(frozen=True)
 class OrganismLoadSpec:
+    # Mapping is checkpoint/source organism index -> target/model organism index.
     index_map: IndexMap | None = None
 
 @dataclass(frozen=True)
 class HeadLoadSpec:
+    # Mapping is (source organism, source output) -> (target organism, target output).
     index_map: HeadIndexMap | None = None
 
 
@@ -169,9 +172,9 @@ def download_deepmind_metadata(
     repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
     repo_dir: str | None = None,
     repo_filename: str = DEFAULT_CONVERTED_METADATA_FILENAME,
-    download_raw_metadata: bool = False,
+    download_raw_metadata: bool = True,
     raw_repo_filename: str = DEFAULT_RAW_METADATA_FILENAME,
-    download_summary_metadata: bool = False,
+    download_summary_metadata: bool = True,
     summary_repo_filename: str = DEFAULT_METADATA_SUMMARY_FILENAME,
     token: str | bool | None = None,
     force_download: bool = False,
@@ -671,13 +674,13 @@ def _flexible_head_keys(
     else:
         potential_head_names = set(head_specs)
 
-    # Allow checkpoint/source heads that are missing from the target model.
+    # Allow (but warn) source heads not in the target
     for head_name in sorted(potential_head_names - target_head_names):
-        print(
-            f"Skipping checkpoint head {head_name!r}; it is not present in the target model."
+        warnings.warn(
+            f"Skipping source head {head_name!r} because it is not present in the target.",
         )
 
-    # Allow target/model heads that have no checkpoint source tensors.
+    # Allow (but warn) target heads not in the source
     if head_specs is None:
         missing_source_head_names = target_head_names - source_head_names
     else:
@@ -685,7 +688,9 @@ def _flexible_head_keys(
             potential_head_names & target_head_names
         ) - source_head_names
     for head_name in sorted(missing_source_head_names):
-        print(f"Target model head {head_name!r} has no matching checkpoint tensors.")
+        warnings.warn(
+            f"Skipping target head {head_name!r} because it is not present in the source.",
+        )
 
     # Do not allow missing keys for selected heads that exist in both models.
     load_head_names = potential_head_names & source_head_names & target_head_names
@@ -887,10 +892,6 @@ def deepmind_metadata(
     metadata_dir: str | Path | None = None,
     *,
     metadata_filename: str = DEFAULT_CONVERTED_METADATA_FILENAME,
-    download_raw_metadata: bool = False,
-    raw_metadata_filename: str = DEFAULT_RAW_METADATA_FILENAME,
-    download_summary_metadata: bool = False,
-    summary_metadata_filename: str = DEFAULT_METADATA_SUMMARY_FILENAME,
     repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
     repo_dir: str | None = None,
     token: str | bool | None = None,
@@ -900,24 +901,6 @@ def deepmind_metadata(
     metadata_path = None if metadata_dir is None else metadata_dir / metadata_filename
 
     if metadata_path is not None and metadata_path.exists() and not force_download:
-        if download_raw_metadata:
-            _download_hf_file(
-                metadata_dir,
-                repo_id=repo_id,
-                repo_dir=repo_dir,
-                repo_filename=raw_metadata_filename,
-                token=token,
-                force_download=force_download,
-            )
-        if download_summary_metadata:
-            _download_hf_file(
-                metadata_dir,
-                repo_id=repo_id,
-                repo_dir=repo_dir,
-                repo_filename=summary_metadata_filename,
-                token=token,
-                force_download=force_download,
-            )
         return _load_metadata_json(metadata_path)
 
     metadata_path = download_deepmind_metadata(
@@ -925,10 +908,8 @@ def deepmind_metadata(
         repo_id=repo_id,
         repo_dir=repo_dir,
         repo_filename=metadata_filename,
-        download_raw_metadata=download_raw_metadata,
-        raw_repo_filename=raw_metadata_filename,
-        download_summary_metadata=download_summary_metadata,
-        summary_repo_filename=summary_metadata_filename,
+        download_raw_metadata=False,
+        download_summary_metadata=False,
         token=token,
         force_download=force_download,
     )

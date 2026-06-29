@@ -11,7 +11,7 @@ The metadata object is a compact way to dictate and get relevant information for
 
 For each enabled head, you define output size **per organism**:
 - genome-track heads (`atac`, `dnase`, `procap`, `cage`, `rna_seq`, `chip_tf`, `chip_histone`), `contact_maps`, `splice_sites_classification`, and `splice_sites_usage` use `num_tracks: [T_org0, T_org1, ...]`
-- splice-junction uses `num_tissues: [T_org0, T_org1, ...]`
+- `splice_sites_junction` uses `num_tissues: [T_org0, T_org1, ...]`
 - masked-language-modeling does not use tracks/tissues
 
 For genome-track heads, metadata also stores `means` with shape `[O, max(T)]`. Those means are used inside the head to scale targets/predictions by division/multiplication, respectively. Because the `MultiOrganismLinear([O, D, T])` module is a dense weight tensor that always predicts `T` values, regardless of organism, some tracks/tissues are padded. These padded tracks/tissues are masked from the loss by passing in their respective tissue/track masks and should be given dummy mean values of 1.0. You can also call `metadata.make_all_masks()` to get the masks as a result of padding, but can also adjust it for any missing tracks/tissues for a specific data batch.

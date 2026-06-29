@@ -1,3 +1,5 @@
+# External
+import argparse
 import os
 
 import pytest
@@ -6,7 +8,17 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# Internal
 from alphagenome_pt.distributed import dist_sum, is_dist
+
+
+DEFAULT_ATOL = 1e-5
+DEFAULT_RTOL = 1e-5
+# NOTE: environment variables are used to pass arguments when using pytest
+ATOL_ENV = "ALPHAGENOME_PT_BN_GRAD_ATOL"
+RTOL_ENV = "ALPHAGENOME_PT_BN_GRAD_RTOL"
+PRINT_ENV = "ALPHAGENOME_PT_BN_GRAD_PRINT"
+
 
 
 class DummyBatchNorm(nn.Module):
@@ -29,6 +41,17 @@ class DummyBatchNorm(nn.Module):
 
         rms = torch.sqrt(var + self.eps).view(1, 1, -1)
         return x / rms
+
+
+def _float_env(name: str, default: float) -> float:
+    return float(os.environ.get(name, default))
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
 def _setup_dist_from_torchrun() -> tuple[int, int]:
@@ -84,4 +107,38 @@ def test_dist_sum_batch_norm_grad_matches_local_when_inputs_match():
     assert x_ddp.grad is not None
     assert torch.isfinite(x_baseline.grad).all()
     assert torch.isfinite(x_ddp.grad).all()
-    assert torch.allclose(x_baseline.grad, x_ddp.grad, atol=1e-5, rtol=1e-5)
+
+    atol = _float_env(ATOL_ENV, DEFAULT_ATOL)
+    rtol = _float_env(RTOL_ENV, DEFAULT_RTOL)
+    if _bool_env(PRINT_ENV):
+        grad_diff = (x_baseline.grad - x_ddp.grad).abs().max()
+        print(
+            f"rank={local_rank} "
+            f"loss_baseline={float(loss_baseline.detach().cpu()):.6g} "
+            f"loss_ddp={float(loss_ddp.detach().cpu()):.6g} "
+            f"max_grad_diff={float(grad_diff.detach().cpu()):.6g} "
+            f"atol={atol:.6g} rtol={rtol:.6g}"
+        )
+
+    assert torch.allclose(
+        x_baseline.grad,
+        x_ddp.grad,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--atol", type=float, default=DEFAULT_ATOL)
+    parser.add_argument("--rtol", type=float, default=DEFAULT_RTOL)
+    parser.add_argument("--print", dest="do_print", action="store_true")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    os.environ[ATOL_ENV] = str(args.atol)
+    os.environ[RTOL_ENV] = str(args.rtol)
+    os.environ[PRINT_ENV] = str(args.do_print)
+    raise SystemExit(pytest.main([__file__, "-q", "-s"]))

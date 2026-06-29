@@ -1,9 +1,28 @@
 # Internal
 from .distributed import is_dist, is_rank0, dist_print, dist_sum
 from .bundles import BundleName
+from .heads import HeadName
 from .schemas import DataBatch
 from .metadata import Metadata
 from .model import AlphaGenome, AlphaGenomeConfig, SequenceEncoder
+from .synthetic import (
+    small_alphagenome,
+    synthetic_batch,
+    synthetic_contact_maps,
+    synthetic_dna_sequence,
+    synthetic_genome_tracks,
+    synthetic_metadata,
+    synthetic_metadata_track_mask,
+    synthetic_mlm,
+    synthetic_organism_index,
+    synthetic_poisson_tracks,
+    synthetic_rna_seq_strand,
+    synthetic_sample_track_mask,
+    synthetic_splice_junctions,
+    synthetic_splice_site_positions,
+    synthetic_splice_site_usage,
+    synthetic_splice_sites,
+)
 from .utils import package_version
 from .checkpoint import (
     DEFAULT_ALPHAGENOME_REPO_ID,
@@ -46,6 +65,7 @@ __all__ = [
     "FOLD_NAMES",
     "FoldName",
     "HeadLoadSpec",
+    "HeadName",
     "Metadata",
     "OrganismLoadSpec",
     "SequenceEncoder",
@@ -70,4 +90,20 @@ __all__ = [
     "official_alphagenome_metadata",
     "official_alphagenome_model",
     "package_version",
+    "small_alphagenome",
+    "synthetic_batch",
+    "synthetic_contact_maps",
+    "synthetic_dna_sequence",
+    "synthetic_genome_tracks",
+    "synthetic_metadata",
+    "synthetic_metadata_track_mask",
+    "synthetic_mlm",
+    "synthetic_organism_index",
+    "synthetic_poisson_tracks",
+    "synthetic_rna_seq_strand",
+    "synthetic_sample_track_mask",
+    "synthetic_splice_junctions",
+    "synthetic_splice_site_positions",
+    "synthetic_splice_site_usage",
+    "synthetic_splice_sites",
 ]

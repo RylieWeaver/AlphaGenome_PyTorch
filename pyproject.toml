@@ -7,6 +7,7 @@ name = "alphagenome_pt"
 version = "0.2.0"
 authors = [
   { name="Rylie Weaver", email="rylieweaver9@gmail.com" },
+  { name="Gomathi Lakshmanan", email="gomathi.l@hotmail.com" },
   { name="John Lagergren", email="lagergrenjh@ornl.gov" }
 ]
 dependencies = [
@@ -47,13 +48,7 @@ jax2pt = [
 ]
 
 [project.scripts]
-alphagenome-pt-convert-jax = "alphagenome_pt.jax2pt.convert_state:main"
-alphagenome-pt-export-metadata = "alphagenome_pt.jax2pt.convert_metadata:main"
-alphagenome-pt-upload-hf = "alphagenome_pt.jax2pt.hf_upload:main"
-alphagenome-pt-inspect-jax = "alphagenome_pt.jax2pt.inspect_state_jax:main"
-alphagenome-pt-inspect-metadata = "alphagenome_pt.jax2pt.inspect_metadata_public:main"
-alphagenome-pt-inspect-metadata-table = "alphagenome_pt.jax2pt.inspect_metadata_table:main"
-alphagenome-pt-inspect-torch = "alphagenome_pt.jax2pt.inspect_state_torch:main"
+alphagenome-pt-download = "alphagenome_pt.cli.download:main"
 
 [project.urls]
 Homepage = "https://github.com/RylieWeaver/AlphaGenome_PyTorch"

@@ -1,15 +1,17 @@
+# External
 import pytest
 import torch
 
-from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, DataBatch
-
-from .helpers import (
-    assert_finite_scalars,
-    build_metadata,
-    build_small_model,
-    make_means,
-    random_dna_batch,
+# Internal
+from alphagenome_pt import (
+    AlphaGenome,
+    AlphaGenomeConfig,
+    HeadName,
+    synthetic_batch,
+    synthetic_metadata,
+    small_alphagenome,
 )
+from .helpers import assert_finite_scalars
 
 
 @pytest.mark.parametrize(
@@ -49,56 +51,32 @@ from .helpers import (
     ],
 )
 def test_hyperparameter_smoke(cfg_overrides: dict):
-    metadata = build_metadata({"masked_language_modeling": {}}, organisms=("human",))
-    model = build_small_model(metadata, **cfg_overrides)
-
-    batch_size = 1
-    seq_len = model.max_seq_len
-    organism_index = torch.zeros(batch_size, dtype=torch.long)
-    labels = torch.randint(0, 5, (batch_size, seq_len), dtype=torch.long)
-    batch = DataBatch(
-        dna_sequence=random_dna_batch(batch_size, seq_len),
-        organism_index=organism_index,
-        mlm=labels,
+    metadata = synthetic_metadata(
+        (HeadName.MASKED_LANGUAGE_MODELING,),
+        organisms=("human",),
     )
+    model = small_alphagenome(metadata, **cfg_overrides)
+
+    batch = synthetic_batch(metadata, batch_size=1, seq_len=model.max_seq_len)
 
     total_loss, scalars, _ = model.loss(batch)
     total_loss.backward()
 
-    grad_norm = sum(
-        p.grad.abs().sum().item() for p in model.parameters() if p.grad is not None
-    )
-
     assert torch.isfinite(total_loss)
     assert_finite_scalars(scalars)
-    assert grad_norm > 0.0
+    assert any(
+        p.grad is not None and torch.any(p.grad != 0)
+        for p in model.parameters()
+    )
 
 
 def test_config_save_load_roundtrip(tmp_path):
-    metadata = build_metadata(
-        {
-            "masked_language_modeling": {},
-            "rna_seq": {
-                "num_tracks": [4],
-                "means": make_means([4]),
-            },
-        },
+    metadata = synthetic_metadata(
+        (HeadName.MASKED_LANGUAGE_MODELING, HeadName.RNA_SEQ),
         organisms=("human",),
     )
-    cfg = AlphaGenomeConfig(
-        max_seq_len=2048,
-        num_channels=80,
-        channel_increment=10,
-        transformer_layers=2,
-        num_q_heads=4,
-        num_kv_heads=2,
-        qk_head_dim=20,
-        v_head_dim=20,
-        pair_channels=16,
-        pair_heads=8,
-        sync_bn=False,
-        metadata=metadata,
-    )
+    model = small_alphagenome(metadata)
+    cfg = model.cfg
 
     cfg_path = tmp_path / "config.json"
     metadata_path = tmp_path / "metadata.pt"
@@ -126,35 +104,34 @@ def test_config_save_load_roundtrip(tmp_path):
         cfg.metadata.metadata["heads"]["rna_seq"]["track_mask"],
     )
 
+    loaded_model = AlphaGenome(loaded)
+    loaded_model.load_state_dict(model.state_dict())
+    batch = synthetic_batch(metadata, batch_size=1, seq_len=model.max_seq_len)
 
-def test_config_save_load_allows_model_reconstruction(tmp_path):
-    metadata = build_metadata(
-        {"masked_language_modeling": {}},
-        organisms=("human",),
-    )
-    cfg = AlphaGenomeConfig(
-        max_seq_len=2048,
-        num_channels=64,
-        transformer_layers=1,
-        metadata=metadata,
-    )
+    model.zero_grad(set_to_none=True)
+    loss, scalars, _ = model.loss(batch)
+    loss.backward()
+    grads = {
+        name: param.grad.detach().clone()
+        for name, param in model.named_parameters()
+        if param.grad is not None
+    }
 
-    cfg_path = tmp_path / "config.json"
-    metadata_path = tmp_path / "metadata.pt"
-    cfg.save(cfg_path, metadata_path)
-    loaded_cfg = AlphaGenomeConfig.load(cfg_path, metadata_path)
-    model = AlphaGenome(loaded_cfg)
+    loaded_model.zero_grad(set_to_none=True)
+    loaded_loss, loaded_scalars, _ = loaded_model.loss(batch)
+    loaded_loss.backward()
+    loaded_grads = {
+        name: param.grad.detach().clone()
+        for name, param in loaded_model.named_parameters()
+        if param.grad is not None
+    }
 
-    batch_size = 1
-    seq_len = model.max_seq_len
-    organism_index = torch.zeros(batch_size, dtype=torch.long)
-    labels = torch.randint(0, 5, (batch_size, seq_len), dtype=torch.long)
-    batch = DataBatch(
-        dna_sequence=random_dna_batch(batch_size, seq_len),
-        organism_index=organism_index,
-        mlm=labels,
-    )
-
-    total_loss, scalars, _ = model.loss(batch)
-    assert torch.isfinite(total_loss)
+    assert torch.allclose(loss, loaded_loss)
+    assert scalars.keys() == loaded_scalars.keys()
+    for key, value in scalars.items():
+        assert torch.allclose(value, loaded_scalars[key])
+    assert grads.keys() == loaded_grads.keys()
+    for key, value in grads.items():
+        assert torch.allclose(value, loaded_grads[key])
+    assert torch.isfinite(loss)
     assert_finite_scalars(scalars)

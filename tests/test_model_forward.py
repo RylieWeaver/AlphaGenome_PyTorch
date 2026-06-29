@@ -1,18 +1,23 @@
+# External
 import torch
 
-from alphagenome_pt import DataBatch
-
-from .helpers import build_metadata, build_small_model, random_dna_batch
+from alphagenome_pt import (
+    DataBatch,
+    HeadName,
+    small_alphagenome,
+    synthetic_dna_sequence,
+    synthetic_metadata,
+)
 
 
 def test_forward_uses_batch_organism_index():
-    metadata = build_metadata({"masked_language_modeling": {}})
-    model = build_small_model(metadata)
+    metadata = synthetic_metadata((HeadName.MASKED_LANGUAGE_MODELING,))
+    model = small_alphagenome(metadata)
     model.eval()
 
     batch_size = 2
     seq_len = model.max_seq_len
-    dna_sequence = random_dna_batch(batch_size, seq_len)
+    dna_sequence = synthetic_dna_sequence(batch_size, seq_len)
 
     batch_mixed = DataBatch(
         dna_sequence=dna_sequence,
@@ -41,13 +46,13 @@ def test_forward_uses_batch_organism_index():
 
 
 def test_forward_defaults_missing_organism_index_to_zero():
-    metadata = build_metadata({"masked_language_modeling": {}})
-    model = build_small_model(metadata)
+    metadata = synthetic_metadata((HeadName.MASKED_LANGUAGE_MODELING,))
+    model = small_alphagenome(metadata)
     model.eval()
 
     batch_size = 2
     seq_len = model.max_seq_len
-    dna_sequence = random_dna_batch(batch_size, seq_len)
+    dna_sequence = synthetic_dna_sequence(batch_size, seq_len)
 
     batch_missing = DataBatch(dna_sequence=dna_sequence)
     batch_zero = DataBatch(
@@ -60,6 +65,14 @@ def test_forward_defaults_missing_organism_index_to_zero():
         _, embeddings_zero = model(batch_zero)
 
     assert torch.allclose(
+        embeddings_missing.embeddings_1bp,
+        embeddings_zero.embeddings_1bp,
+    )
+    assert torch.allclose(
         embeddings_missing.embeddings_128bp,
         embeddings_zero.embeddings_128bp,
+    )
+    assert torch.allclose(
+        embeddings_missing.embeddings_pair,
+        embeddings_zero.embeddings_pair,
     )
