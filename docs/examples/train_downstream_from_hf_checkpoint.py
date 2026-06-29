@@ -37,7 +37,6 @@ if __name__ == "__main__":
         device=device,
         metadata=metadata.metadata,
         load_state=True,
-        local_filename="alphagenome_all-folds.pt",
         heads=False,
     )
 

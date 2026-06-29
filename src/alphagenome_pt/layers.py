@@ -13,8 +13,7 @@ class GELU_1702(Module):
     # NOTE: AlphaGenome applies a custom scaled GELU
     # in its conv blocks and output embeddings.
     def forward(self, x):
-        c = torch.tensor(1.702, dtype=x.dtype, device=x.device)
-        return torch.sigmoid(c * x) * x
+        return torch.sigmoid(1.702 * x) * x
 
 
 class BatchNorm(nn.Module):

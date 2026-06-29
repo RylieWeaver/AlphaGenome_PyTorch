@@ -1032,7 +1032,7 @@ class SpliceSitesJunctionHead(Head):
         x: torch.Tensor,                        # [B, S, C]
         splice_site_positions: torch.Tensor,    # [B, 4, P]
         organism_index: torch.Tensor,           # [B]
-        tissue_mask: torch.Tensor,              # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,       # [B, #A, #D, T]
     ) -> tuple[torch.Tensor, torch.Tensor]:     # both [B, D, A, 2*T]
         """Splice site junctions."""
         assert splice_site_positions.shape[1] == 4, \
@@ -1041,7 +1041,7 @@ class SpliceSitesJunctionHead(Head):
             tissue_mask,
             name="_tissue_mask",
             organism_index=organism_index,
-            ndim=tissue_mask.ndim,
+            ndim=4,
         )
         pos_donor_idx = splice_site_positions[:, 0, :]      # [B, D]
         pos_accept_idx = splice_site_positions[:, 1, :]     # [B, A]
@@ -1118,7 +1118,7 @@ class SpliceSitesJunctionHead(Head):
         self,
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B]
-        tissue_mask: torch.Tensor,                      # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,               # [B, #A, #D, T]
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings."""
@@ -1148,8 +1148,12 @@ class SpliceSitesJunctionHead(Head):
 
         pred_pair = predictions['predictions']
         pairs_mask = predictions['splice_junction_mask']
-        mask = self._get_track_mask(batch.splice_junctions_mask)
-        pairs_mask = pairs_mask * mask
+        if batch.splice_junctions_mask is not None:
+            mask = self._get_track_mask(batch.splice_junctions_mask)
+            pairs_mask = pairs_mask.to(torch.bool) & mask.to(
+                device=pairs_mask.device,
+                dtype=torch.bool,
+            )
         # Junctions shape is [B, D, A, 2*T]
 
         def _scale_junction_counts(counts):     # [B, D, A, 2*T]

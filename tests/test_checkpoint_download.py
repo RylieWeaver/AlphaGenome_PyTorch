@@ -19,9 +19,11 @@ from alphagenome_pt import (
     deepmind_config,
     deepmind_metadata,
     deepmind_model,
+    download_alphagenome_checkpoint,
     download_deepmind_metadata,
     download_deepmind_state,
     fold_filename,
+    load_alphagenome_checkpoint,
     load_deepmind_state,
     small_alphagenome,
     synthetic_metadata,
@@ -739,3 +741,64 @@ def test_load_deepmind_model_can_load_state(monkeypatch, tmp_path):
 
     assert isinstance(model, torch.nn.Module)
     _assert_equal_keys(source_state, model, EXAMPLE_ALWAYS_LOADED_KEYS)
+
+
+### BACKWARDS-COMPATIBILITY ALIASES ###
+def test_download_alphagenome_checkpoint_accepts_output_file(monkeypatch, tmp_path):
+    downloaded_filenames = []
+
+    def fake_download_deepmind_state(local_dir=None, **kwargs):
+        downloaded_filenames.append(fold_filename(kwargs["fold"]))
+        path = local_dir / fold_filename(kwargs["fold"])
+        path.write_text("checkpoint")
+        return path
+
+    monkeypatch.setattr(
+        "alphagenome_pt.checkpoint.download_deepmind_state",
+        fake_download_deepmind_state,
+    )
+
+    output_path = tmp_path / "old_checkpoint_name.pt"
+    path = download_alphagenome_checkpoint(output_path)
+
+    assert path == output_path
+    assert path.read_text() == "checkpoint"
+    assert downloaded_filenames == [fold_filename(DEFAULT_FOLD)]
+
+
+def test_load_alphagenome_checkpoint_accepts_checkpoint_file(tmp_path):
+    source_model = small_alphagenome()
+    target_model = small_alphagenome()
+
+    _fill_model_state(source_model, 1.0)
+    _fill_model_state(target_model, -1.0)
+
+    source_state = source_model.state_dict()
+    checkpoint_path = _save_state(tmp_path, source_state, "old_checkpoint_name.pt")
+
+    load_result = load_alphagenome_checkpoint(
+        target_model,
+        checkpoint_path,
+    )
+
+    _assert_equal_keys(source_state, target_model, EXAMPLE_ALWAYS_LOADED_KEYS)
+    assert load_result.unexpected_keys == []
+
+
+def test_load_alphagenome_checkpoint_accepts_checkpoint_directory(tmp_path):
+    source_model = small_alphagenome()
+    target_model = small_alphagenome()
+
+    _fill_model_state(source_model, 1.0)
+    _fill_model_state(target_model, -1.0)
+
+    source_state = source_model.state_dict()
+    _save_state(tmp_path, source_state)
+
+    load_result = load_alphagenome_checkpoint(
+        target_model,
+        tmp_path,
+    )
+
+    _assert_equal_keys(source_state, target_model, EXAMPLE_ALWAYS_LOADED_KEYS)
+    assert load_result.unexpected_keys == []

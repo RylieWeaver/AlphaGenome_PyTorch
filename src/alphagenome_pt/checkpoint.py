@@ -994,12 +994,73 @@ def download_alphagenome_metadata(*args, **kwargs) -> Path:
     return download_deepmind_metadata(*args, **kwargs)
 
 
-def download_alphagenome_checkpoint(*args, **kwargs) -> Path | list[Path]:
-    return download_deepmind_state(*args, **kwargs)
+def download_alphagenome_checkpoint(
+    output_path: str | Path | None = None,
+    *,
+    fold: FoldName = DEFAULT_FOLD,
+    repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
+    repo_dir: str | None = None,
+    token: str | bool | None = None,
+    force_download: bool = False,
+) -> Path:
+    # Backwards-compatibility shim for older callers that passed a destination
+    # directory or destination checkpoint file as the first argument.
+    output_path = None if output_path is None else Path(output_path).expanduser()
+    local_dir = (
+        output_path.parent
+        if output_path is not None and output_path.suffix
+        else output_path
+    )
+    downloaded_path = download_deepmind_state(
+        local_dir,
+        fold=fold,
+        repo_id=repo_id,
+        repo_dir=repo_dir,
+        token=token,
+        force_download=force_download,
+    )
+    if output_path is not None and output_path.suffix:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if downloaded_path.resolve() != output_path.resolve():
+            shutil.copy2(downloaded_path, output_path)
+        return output_path
+    return downloaded_path
 
 
-def load_alphagenome_checkpoint(*args, **kwargs):
-    return load_deepmind_state(*args, **kwargs)
+def load_alphagenome_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path | None = None,
+    *,
+    heads: bool = True,
+    organisms: bool = True,
+    **kwargs,
+):
+    # Backwards-compatibility shim for older callers that passed a checkpoint
+    # file or directory as the second positional argument.
+    if checkpoint_path is None:
+        return load_deepmind_state(
+            model,
+            heads=heads,
+            organisms=organisms,
+            **kwargs,
+        )
+
+    path = Path(checkpoint_path).expanduser()
+    if path.exists() and path.is_dir():
+        local_dir = path
+        local_filename = kwargs.pop("local_filename", fold_filename(DEFAULT_FOLD))
+    else:
+        local_dir = path.parent
+        local_filename = path.name
+
+    return load_deepmind_state(
+        model,
+        local_dir=local_dir,
+        local_filename=local_filename,
+        heads=heads,
+        organisms=organisms,
+        **kwargs,
+    )
 
 
 def deepmind_alphagenome_config(*args, **kwargs):
@@ -1019,3 +1080,160 @@ def official_alphagenome_config(*args, **kwargs):
 
 def official_alphagenome_model(*args, **kwargs):
     return deepmind_model(*args, **kwargs)
+
+
+
+### DEPRECATED ALIASED FUNCTIONS AND THEIR USES ###
+# def download_alphagenome_checkpoint(
+#     output_path: str | Path,
+#     *,
+#     repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
+#     filename: str = DEFAULT_ALPHAGENOME_CHECKPOINT,
+#     token: str | bool | None = None,
+#     force_download: bool = False,
+# ) -> Path:
+#     """Download the converted AlphaGenome PyTorch checkpoint from Hugging Face Hub.
+
+#     Args:
+#         output_path: Destination file path, or an existing directory. If a directory
+#             is provided, the checkpoint is saved under ``filename`` inside it.
+#         repo_id: Hugging Face Hub model repo ID.
+#         filename: File name in the Hub repo.
+#         token: Hugging Face auth token. If None, huggingface_hub uses the env token.
+#         force_download: Whether to force a fresh download from the Hub.
+
+#     Returns:
+#         Path to the saved checkpoint file.
+#     """
+#     try:
+#         from huggingface_hub import hf_hub_download
+#     except ImportError as exc:
+#         raise ImportError(
+#             "download_alphagenome_checkpoint requires huggingface_hub. "
+#             "Install it with `pip install huggingface_hub` or "
+#             "`pip install alphagenome_pt[hub]`."
+#         ) from exc
+
+#     output_path = Path(output_path)
+#     if output_path.exists() and output_path.is_dir():
+#         destination = output_path / filename
+#     elif output_path.suffix:
+#         destination = output_path
+#     else:
+#         destination = output_path / filename
+
+#     downloaded_path = Path(
+#         hf_hub_download(
+#             repo_id=repo_id,
+#             filename=filename,
+#             token=token,
+#             force_download=force_download,
+#         )
+#     )
+
+#     destination.parent.mkdir(parents=True, exist_ok=True)
+#     if downloaded_path.resolve() != destination.resolve():
+#         shutil.copy2(downloaded_path, destination)
+
+#     return destination
+
+# def load_alphagenome_checkpoint(
+#     model: nn.Module,
+#     checkpoint_path: str | Path,
+#     *,
+#     heads: bool = False,
+#     organisms: bool = True,
+#     repo_id: str = DEFAULT_ALPHAGENOME_REPO_ID,
+#     filename: str = DEFAULT_ALPHAGENOME_CHECKPOINT,
+#     token: str | bool | None = None,
+#     force_download: bool = False,
+#     map_location: str | torch.device = "cpu",
+#     assign: bool = True,
+# ):
+#     """Load converted official AlphaGenome weights into a PyTorch model.
+
+#     If ``checkpoint_path`` does not exist, the checkpoint is downloaded there
+#     with :func:`download_alphagenome_checkpoint`.
+
+#     Args:
+#         model: PyTorch AlphaGenome model.
+#         checkpoint_path: Local checkpoint file path, or directory destination.
+#         heads: If False, skip all ``_heads.*`` tensors so users can load the
+#             official trunk with custom downstream heads.
+#         organisms: If False, skip organism embedding tensors so users can load
+#             the official trunk into models with different organism metadata.
+#         repo_id: Hugging Face Hub model repo ID.
+#         filename: File name in the Hub repo.
+#         token: Hugging Face auth token. If None, huggingface_hub uses env auth.
+#         force_download: Whether to force a fresh download from the Hub.
+#         map_location: ``torch.load`` map location.
+#         assign: Passed through to ``model.load_state_dict``.
+
+#     Returns:
+#         The ``load_state_dict`` incompatible-keys result.
+#     """
+#     checkpoint_path = Path(checkpoint_path)
+#     if checkpoint_path.exists() and checkpoint_path.is_dir():
+#         resolved_checkpoint_path = checkpoint_path / filename
+#     elif checkpoint_path.suffix:
+#         resolved_checkpoint_path = checkpoint_path
+#     else:
+#         resolved_checkpoint_path = checkpoint_path / filename
+
+#     if not resolved_checkpoint_path.exists() or force_download:
+#         resolved_checkpoint_path = download_alphagenome_checkpoint(
+#             checkpoint_path,
+#             repo_id=repo_id,
+#             filename=filename,
+#             token=token,
+#             force_download=force_download,
+#         )
+
+#     state_dict = torch.load(resolved_checkpoint_path, map_location=map_location)
+#     skipped_head_keys: set[str] = set()
+#     skipped_organism_keys: set[str] = set()
+#     if not heads:
+#         skipped_head_keys = {
+#             key
+#             for key in model.state_dict()
+#             if key.startswith("_heads.")
+#         }
+#         state_dict = {
+#             key: value
+#             for key, value in state_dict.items()
+#             if not key.startswith("_heads.")
+#         }
+#     if not organisms:
+#         skipped_organism_keys = {
+#             key
+#             for key in model.state_dict()
+#             if _is_organism_embedding_key(key)
+#         }
+#         state_dict = {
+#             key: value
+#             for key, value in state_dict.items()
+#             if not _is_organism_embedding_key(key)
+#         }
+
+#     load_result = model.load_state_dict(state_dict, strict=False, assign=assign)
+#     missing_keys = [
+#         key
+#         for key in load_result.missing_keys
+#         if (
+#             key not in skipped_head_keys and
+#             key not in skipped_organism_keys and
+#             not key.endswith("._track_means")
+#         )
+#     ]
+#     return CheckpointLoadResult(
+#         missing_keys=missing_keys,
+#         unexpected_keys=list(load_result.unexpected_keys),
+#     )
+
+# load_result = load_alphagenome_checkpoint(
+#     model,
+#     checkpoint_path,
+#     heads=True,       # keep released output heads
+#     organisms=True,	  # keep released human/mouse organism parameters
+#     map_location="cpu",
+# )
