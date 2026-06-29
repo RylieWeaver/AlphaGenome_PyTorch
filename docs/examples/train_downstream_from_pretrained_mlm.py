@@ -72,7 +72,11 @@ if __name__ == "__main__":
 
     downstream_heads = set(model.metadata.get_heads()) - {HeadName.MASKED_LANGUAGE_MODELING.value}
     set_enabled_heads(model, downstream_heads)
-    batch = synthetic_batch(model.metadata, seq_len=model.max_seq_len).to(device)
+    batch = synthetic_batch(
+        model.metadata,
+        seq_len=model.max_seq_len,
+        num_splice_sites=model.num_splice_sites,
+    ).to(device)
     example_train(model, [batch], optimizer, steps=1000)
 
     print("SUCCESS")

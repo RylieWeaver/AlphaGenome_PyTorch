@@ -743,6 +743,43 @@ def test_load_deepmind_model_can_load_state(monkeypatch, tmp_path):
     _assert_equal_keys(source_state, model, EXAMPLE_ALWAYS_LOADED_KEYS)
 
 
+def test_deepmind_model_passes_repo_dir_to_metadata(monkeypatch):
+    metadata_calls = []
+
+    def fake_deepmind_metadata(**kwargs):
+        metadata_calls.append(kwargs)
+        return {
+            "organisms": ["human"],
+            "heads": {},
+        }
+
+    def fake_alphagenome(config):
+        return small_alphagenome(config.metadata)
+
+    monkeypatch.setattr(
+        "alphagenome_pt.checkpoint.deepmind_metadata",
+        fake_deepmind_metadata,
+    )
+    monkeypatch.setattr("alphagenome_pt.checkpoint.AlphaGenome", fake_alphagenome)
+
+    model = deepmind_model(
+        repo_id="repo",
+        repo_dir="v_test",
+        token="token",
+        force_download=True,
+    )
+
+    assert isinstance(model, torch.nn.Module)
+    assert metadata_calls == [
+        {
+            "repo_id": "repo",
+            "repo_dir": "v_test",
+            "token": "token",
+            "force_download": True,
+        }
+    ]
+
+
 ### BACKWARDS-COMPATIBILITY ALIASES ###
 def test_download_alphagenome_checkpoint_accepts_output_file(monkeypatch, tmp_path):
     downloaded_filenames = []

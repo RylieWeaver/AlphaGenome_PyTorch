@@ -960,7 +960,12 @@ def deepmind_model(
     assign: bool = True,
 ):
     if metadata is None:
-        metadata = deepmind_metadata()
+        metadata = deepmind_metadata(
+            repo_id=repo_id,
+            repo_dir=repo_dir,
+            token=token,
+            force_download=force_download,
+        )
     model = AlphaGenome(deepmind_config(metadata=metadata))
     if load_state:
         load_deepmind_state(

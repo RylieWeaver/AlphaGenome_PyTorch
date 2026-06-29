@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for PyTorch model inspection. Defaults to CPU. Examples: cpu, cuda, cuda:0, mps.",
+        help="Device to use for PyTorch model inspection. Defaults to CPU. Examples: cpu, gpu, cuda, mps.",
     )
     parser.add_argument(
         "--output",

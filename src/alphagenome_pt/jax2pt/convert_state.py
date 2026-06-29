@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for JAX checkpoint loading. Defaults to CPU. Examples: cpu, gpu, cuda, cuda:0.",
+        help="Device to use for JAX checkpoint loading. Defaults to CPU. Examples: cpu, gpu, cuda, mps.",
     )
     return parser.parse_args()
 

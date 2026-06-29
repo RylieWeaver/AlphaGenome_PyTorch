@@ -38,7 +38,7 @@ def main():
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for JAX checkpoint loading. Defaults to CPU. Examples: cpu, gpu, cuda, cuda:0.",
+        help="Device to use for JAX checkpoint loading. Defaults to CPU. Examples: cpu, gpu, cuda, mps.",
     )
     parser.add_argument(
         "--output",

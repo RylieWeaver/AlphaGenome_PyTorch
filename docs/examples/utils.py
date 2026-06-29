@@ -78,7 +78,7 @@ def synthetic_data_splits(
     num_test_batches: int = 5,
     batch_size: int = 2,
     seq_len: int = 8192,
-    num_splice_sites: int = 2,
+    num_splice_sites: int | None = None,
 ) -> dict[str, list[DataBatch]]:
     def batches(num_batches: int) -> list[DataBatch]:
         return [
@@ -147,7 +147,6 @@ def example_train_val_test(
     num_test_batches: int = 5,
     batch_size: int = 2,
     seq_len: int | None = None,
-    num_splice_sites: int = 2,
     lr: float = 1e-4,
     optimizer: torch.optim.Optimizer | None = None,
     **cfg_overrides,
@@ -168,7 +167,7 @@ def example_train_val_test(
         num_test_batches=num_test_batches,
         batch_size=batch_size,
         seq_len=seq_len,
-        num_splice_sites=num_splice_sites,
+        num_splice_sites=model.num_splice_sites,
     )
 
     print("eval step 0")

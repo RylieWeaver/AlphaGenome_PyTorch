@@ -67,7 +67,7 @@ JAX inspect arguments:
 | --- | --- | --- | --- |
 | `--fold` | `str` | `all_folds` | Official checkpoint fold to inspect: `all_folds`, `fold_0`, `fold_1`, `fold_2`, or `fold_3`. |
 | `--model-path` | `path` | none | Local official JAX checkpoint path. If set, inspection uses this path instead of loading `--fold` from Hugging Face. |
-| `--device` | `str` | `cpu` | Device string. Defaults to CPU. Examples: `cpu`, `gpu`, `cuda`, `cuda:0`. |
+| `--device` | `str` | `cpu` | Device string. Defaults to CPU. Examples: `cpu`, `gpu`, `cuda`, `mps`. |
 | `--output`, `-o` | `path` | `jax_params.txt` | Writes JAX parameter/state key and shape summary to this path. |
 
 Metadata inspect arguments:
@@ -88,7 +88,7 @@ Torch inspect arguments:
 
 | Argument | Type | Default | Values / behavior |
 | --- | --- | --- | --- |
-| `--device` | `str` | `cpu` | Device string. Defaults to CPU. Examples: `cpu`, `cuda`, `cuda:0`, `mps`. |
+| `--device` | `str` | `cpu` | Device string. Defaults to CPU. Examples: `cpu`, `gpu`, `cuda`, `mps`. |
 | `--output`, `-o` | `path` | `torch_params.txt` | Writes PyTorch parameter/state key and shape summary to this path. |
 
 ## Export Public Metadata
