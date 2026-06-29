@@ -59,7 +59,7 @@ metadata = synthetic_metadata(
     num_organisms=2,
     num_tracks=8,
 )
-# NOTE: can set organisms=False and/or heads=False to skip heads. 
+# NOTE: can set heads=False to skip loading heads and/or organisms=False to skip loading organisms.
 # They are prefix-loaded by default.
 model = deepmind_model(
     metadata=metadata.metadata,
