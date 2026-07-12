@@ -11,6 +11,23 @@ For local development, install test dependencies first:
 ```bash
 pip install -e ".[dev]"
 ```
+## Correctness Tests
+
+`tests/set1/` checks that computed values are right, not just that they run.
+Loss functions are pinned to golden values from the reference JAX
+implementation, the scaling transforms are checked to be exact inverses, every
+parameter is checked to receive a gradient, and checkpoints are checked to
+round-trip bitwise.
+
+These need no GPU, no JAX, and no network, so they
+are part of the normal suite:
+
+```bash
+pytest tests/set1
+```
+
+See `tests/set1/info.md` for what each file covers, which upstream tests it was
+adapted from, and where the golden values came from.
 
 ## Run Everything
 
