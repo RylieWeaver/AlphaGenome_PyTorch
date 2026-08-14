@@ -205,7 +205,12 @@ and masks.
 :color: info
 :icon: info
 
-Splice-junction candidates may be supplied through `DataBatch.splice_site_positions` or generated from an enabled `splice_sites_classification` head. For generated candidates, sites with classification probability below `splice_site_threshold` are stored as `-1` padding, and every junction involving them is excluded by `splice_junction_mask`.See
+Splice-junction candidates may be supplied through
+`DataBatch.splice_site_positions` or generated from an enabled
+`splice_sites_classification` head. For generated candidates, sites with
+classification probability below `splice_site_threshold` are stored as `-1`
+padding, and every junction involving them is excluded by
+`splice_junction_mask`. See
 [Data and Metadata](../background/data-and-metadata.md#other-fields) for the
 position format.
 
