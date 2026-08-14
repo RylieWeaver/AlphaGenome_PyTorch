@@ -1,0 +1,105 @@
+/* AlphaGenome PyTorch documentation design system. */
+
+:root {
+  --agpt-accent: #315f78;
+  --agpt-accent-soft: #eaf3f7;
+  --agpt-border: #d7e0e5;
+  --agpt-surface: #ffffff;
+  --agpt-surface-muted: #f7f9fa;
+  --agpt-shadow: 0 0.25rem 0.9rem rgb(20 45 58 / 8%);
+}
+
+html[data-theme="dark"] {
+  --agpt-accent: #9fc8da;
+  --agpt-accent-soft: #213944;
+  --agpt-border: #526a75;
+  --agpt-surface: #18272e;
+  --agpt-surface-muted: #1e2e35;
+  --agpt-shadow: 0 0.25rem 0.9rem rgb(0 0 0 / 24%);
+}
+
+/* Cards are navigational, so keep them quieter than warnings and figures. */
+.sd-card {
+  border: 1px solid var(--agpt-border);
+  border-radius: 0.7rem;
+  box-shadow: var(--agpt-shadow);
+}
+
+.sd-card-hover:hover {
+  border-color: var(--agpt-accent);
+  box-shadow: 0 0.45rem 1.1rem rgb(20 45 58 / 14%);
+  transform: translateY(-1px);
+}
+
+.sd-card-hover:focus-within {
+  border-color: var(--agpt-accent);
+  box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--agpt-accent) 28%, transparent);
+}
+
+.sd-card-title {
+  color: var(--agpt-accent);
+  font-weight: 650;
+}
+
+.long-table {
+  max-height: min(60vh, 34rem);
+  overflow: auto;
+  border: 1px solid var(--agpt-border);
+  border-radius: 0.45rem;
+}
+
+.long-table table tbody tr:nth-child(even) {
+  background: var(--agpt-surface-muted);
+}
+
+.long-table table th {
+  background: var(--agpt-accent-soft);
+  border-bottom-color: var(--agpt-border);
+}
+
+.long-table table {
+  margin-bottom: 0;
+}
+
+.long-table .pst-scrollable-table-container {
+  overflow: visible;
+}
+
+.long-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Keep heading permalinks without leaving a persistent target highlight. */
+.bd-main .bd-content .bd-article-container .bd-article
+  :target > :is(h1, h2, h3, h4, h5) {
+  background-color: transparent;
+}
+
+/* Keep generated explanatory figures visually integrated with page content. */
+.bd-article img[src*="_images/"] {
+  background: var(--agpt-surface);
+  border: 1px solid var(--agpt-border);
+  border-radius: 0.7rem;
+  box-shadow: var(--agpt-shadow);
+  padding: 0.35rem;
+}
+
+@media (max-width: 767px) {
+  .long-table {
+    max-height: none;
+  }
+
+  .sd-card {
+    box-shadow: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-card-hover,
+  .sd-card-hover:hover {
+    transition: none;
+    transform: none;
+  }
+}

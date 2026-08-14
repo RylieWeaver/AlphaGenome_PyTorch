@@ -260,15 +260,14 @@ class PairMLPBlock(nn.Module):
         # Read inputs
         self.pair_channels = pair_channels      # F
         self.mlp_ratio = mlp_ratio              # M
-        self.dropout = dropout
         self.sync_bn = sync_bn
 
         # Modules
         self.norm = LayerNorm(self.pair_channels, channels_dim=3)
         self.fc1 = nn.Linear(self.pair_channels, self.pair_channels * self.mlp_ratio)
-        self.fc2 = nn.Linear(self.pair_channels * self.mlp_ratio, self.pair_channels)
         self.act = nn.ReLU()
-        self.dropout = nn.Dropout(self.dropout)
+        self.fc2 = nn.Linear(self.pair_channels * self.mlp_ratio, self.pair_channels)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         x = self.norm(x)                    # [B, P, P, F]

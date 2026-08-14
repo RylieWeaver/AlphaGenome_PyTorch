@@ -3,3 +3,4 @@ __pycache__/
 *.pth
 .vscode/
 launch.json
+docs/_build/

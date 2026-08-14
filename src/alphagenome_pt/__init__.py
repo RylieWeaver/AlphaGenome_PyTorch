@@ -4,12 +4,16 @@ from .bundles import BundleName
 from .heads import HeadName
 from .schemas import DataBatch
 from .metadata import Metadata
-from .model import AlphaGenome, AlphaGenomeConfig, SequenceEncoder
+from .embeddings import Embeddings
+from .losses import LossLeaf, MetricTree
+from .model import AlphaGenome, AlphaGenomeConfig, LossOutput, SequenceEncoder
+from .one_hot_encoder import DNAOneHotEncoder
 from .synthetic import (
     small_alphagenome,
     synthetic_batch,
     synthetic_contact_maps,
     synthetic_dna_sequence,
+    synthetic_dna_sequence_one_hot,
     synthetic_genome_tracks,
     synthetic_metadata,
     synthetic_metadata_track_mask,
@@ -57,6 +61,7 @@ __all__ = [
     "AlphaGenomeConfig",
     "BundleName",
     "DataBatch",
+    "DNAOneHotEncoder",
     "DEFAULT_ALPHAGENOME_REPO_ID",
     "DEFAULT_CONVERTED_METADATA_FILENAME",
     "DEFAULT_FOLD",
@@ -64,8 +69,12 @@ __all__ = [
     "DEFAULT_RAW_METADATA_FILENAME",
     "FOLD_NAMES",
     "FoldName",
+    "Embeddings",
     "HeadLoadSpec",
     "HeadName",
+    "LossLeaf",
+    "LossOutput",
+    "MetricTree",
     "Metadata",
     "OrganismLoadSpec",
     "SequenceEncoder",
@@ -94,6 +103,7 @@ __all__ = [
     "synthetic_batch",
     "synthetic_contact_maps",
     "synthetic_dna_sequence",
+    "synthetic_dna_sequence_one_hot",
     "synthetic_genome_tracks",
     "synthetic_metadata",
     "synthetic_metadata_track_mask",

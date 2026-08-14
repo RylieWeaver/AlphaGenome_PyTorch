@@ -8,7 +8,7 @@ from alphagenome_pt import (
     synthetic_metadata,
     small_alphagenome,
 )
-from .helpers import assert_finite_scalars
+from .helpers import assert_finite_metric_tree
 
 
 def test_enabled_flag_skips_disabled_heads():
@@ -19,10 +19,14 @@ def test_enabled_flag_skips_disabled_heads():
     model = small_alphagenome(metadata)
 
     batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
-    total_loss, scalars, predictions = model.loss(batch)
+    result = model.loss(
+        batch,
+        return_predictions=True,
+    )
 
-    assert torch.isfinite(total_loss)
-    assert_finite_scalars(scalars)
-    assert "atac" in predictions
-    assert "rna_seq" not in predictions
-    assert all(not key.startswith("rna_seq_") for key in scalars)
+    assert result.predictions is not None
+    assert torch.isfinite(result.total)
+    assert_finite_metric_tree(result.tree)
+    assert "atac" in result.predictions
+    assert "rna_seq" not in result.predictions
+    assert set(result.tree.head_loss_totals()) == {"atac"}

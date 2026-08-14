@@ -3,9 +3,11 @@
 
 """Imports"""
 # External
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 import json
-from typing import Union
 from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -14,20 +16,43 @@ from einops import rearrange
 from einops.layers.torch import Reduce
 
 # Internal
-from .schemas import Channels, DataBatch
+from .schemas import Channels, DataBatch, ModelInput, OrganismIndex
 from .metadata import Metadata
 from .convolutions import DNAEmbedder, DownResBlock, UpResBlock
 from .attention import TransformerTowerBlock
 from .embeddings import Embeddings, OutputEmbedder, OutputPairEmbedder
 from .heads import create_heads, HeadName
+from .losses import MetricNode, MetricTree
+from .normalize import (
+    _normalize_dna,
+    _normalize_dna_one_hot,
+    _normalize_organism_index,
+    _normalize_splice_site_positions,
+)
+from .one_hot_encoder import DNAOneHotEncoder
 from .splicing import generate_splice_site_positions
 
+
+HeadOutput = dict[str, torch.Tensor]
+Predictions = dict[str, HeadOutput]
+
+_MODEL_CONFIG_FILENAME = "config.json"
+_MODEL_METADATA_FILENAME = "metadata.pt"
+_MODEL_STATE_FILENAME = "model.pt"
+
+
+@dataclass(frozen=True)
+class LossOutput:
+    tree: MetricTree
+    total: torch.Tensor
+    predictions: Predictions | None = None
+    embeddings: Embeddings | None = None
 
 
 class SequenceEncoder(nn.Module):
     """
-    Progressively downsample sequence by 2 in stages. The first stage is a DNA
-    embedder, and subsequent stages are residual blocks that increase channels.
+    Progressively downsample sequence by encoder_downsample_width in stages. The first
+    stage is a DNA embedder, and subsequent stages are residual blocks that increase channels.
     """
     def __init__(
             self,
@@ -201,15 +226,15 @@ class AlphaGenomeConfig():
         # Required
         max_seq_len: int = 8192,
         num_channels: int = 768,
-        channel_increment: int = None,
+        channel_increment: int | None = None,
         transformer_layers: int = 9,
         first_conv_width: int = 15,
         block_width: int = 5,
         num_q_heads: int = 8,
         num_kv_heads: int = 1,
-        qk_head_dim: int = None,
-        v_head_dim: int = None,
-        pair_channels: int = None,
+        qk_head_dim: int | None = None,
+        v_head_dim: int | None = None,
+        pair_channels: int | None = None,
         pair_heads: int = 32,
         pos_channels: int = 64,
         transformer_mlp_ratio: int = 2,
@@ -217,11 +242,11 @@ class AlphaGenomeConfig():
         embedder_mlp_ratio: int = 2,
         dropout: float = 0.0,
         sync_bn: bool = True,
-        num_splice_sites: int = None,
-        splice_site_channels: int = None,
+        num_splice_sites: int | None = None,
+        splice_site_channels: int | None = None,
         splice_site_threshold: float = 0.1,
         min_zero_multinomial_loss: bool = True,
-        metadata: Union[Metadata, dict] = None,
+        metadata: Metadata | dict | None = None,
         **kwargs  # Catches unexpected args if the config is changed in future versions
     ):
         self.model_name = "AlphaGenome"
@@ -234,7 +259,7 @@ class AlphaGenomeConfig():
         self.num_q_heads = num_q_heads
         self.num_kv_heads = num_kv_heads
         self.qk_head_dim = qk_head_dim if qk_head_dim is not None else (num_channels // 12)*2       # (must be kept even for RoPE)
-        self.v_head_dim = v_head_dim if v_head_dim is not None else (num_channels // 8)*2          # (must be kept even for RoPE)
+        self.v_head_dim = v_head_dim if v_head_dim is not None else (num_channels // 8)*2
         self.pair_channels = pair_channels if pair_channels is not None else num_channels // 6
         self.pair_heads = pair_heads
         self.pos_channels = pos_channels
@@ -252,9 +277,9 @@ class AlphaGenomeConfig():
         self.min_zero_multinomial_loss = min_zero_multinomial_loss
 
     def to_dict(self) -> dict:
-        return self.__dict__
+        return self.__dict__.copy()
     
-    def save(self, cfg_path: Union[Path, str], metadata_path: Union[Path, str]):
+    def save(self, cfg_path: Path | str, metadata_path: Path | str):
         cfg_path = Path(cfg_path)
         metadata_path = Path(metadata_path)
 
@@ -267,14 +292,18 @@ class AlphaGenomeConfig():
     
     @staticmethod
     def load(
-        cfg_path: Union[Path, str], metadata_path: Union[Path, str]
+        cfg_path: Path | str, metadata_path: Path | str
     ) -> "AlphaGenomeConfig":
         cfg_path = Path(cfg_path)
         metadata_path = Path(metadata_path)
         with open(cfg_path, "r") as f:
             cfg_dict = json.load(f)
 
-        metadata_raw = torch.load(metadata_path, map_location="cpu")
+        metadata_raw = torch.load(
+            metadata_path,
+            map_location="cpu",
+            weights_only=True,
+        )
         if isinstance(metadata_raw, Metadata):
             metadata_obj = metadata_raw
         elif isinstance(metadata_raw, dict):
@@ -290,6 +319,7 @@ class AlphaGenomeConfig():
 class AlphaGenome(nn.Module):
     def __init__(self, cfg: AlphaGenomeConfig):
         super().__init__()
+        self.dna_one_hot_encoder = DNAOneHotEncoder()
 
         # Read inputs
         self.cfg = cfg
@@ -321,6 +351,8 @@ class AlphaGenome(nn.Module):
             self.metadata = Metadata(cfg.metadata) 
         else:
             self.metadata = cfg.metadata
+        if self.metadata is None:
+            raise ValueError('Metadata is required to define the model.')
         self.num_organisms = self.metadata.get_num_organisms()
 
         # Strictly define the downsampling args to retain consistent bp-resolution
@@ -330,8 +362,10 @@ class AlphaGenome(nn.Module):
 
         # Check inputs
         self.check_seq_len(self.max_seq_len)
-        assert (self.qk_head_dim % 2) == 0, "qk_head_dim must be even for RoPE."
-        assert (self.v_head_dim % 2) == 0, "v_head_dim must be even for RoPE."
+        assert self.qk_head_dim > 0 and (self.qk_head_dim % 2) == 0, (
+            "qk_head_dim must be positive and even for RoPE."
+        )
+        assert self.v_head_dim > 0, "v_head_dim must be positive."
         assert (self.num_q_heads % self.num_kv_heads) == 0, "num_q_heads must be divisible by num_kv_heads."
 
         # Define sizes throughout the model
@@ -399,6 +433,35 @@ class AlphaGenome(nn.Module):
             metadata=self.metadata,
         )
 
+    def save(self, model_dir: Path | str) -> None:
+        model_dir = Path(model_dir)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        self.cfg.save(
+            cfg_path=model_dir / _MODEL_CONFIG_FILENAME,
+            metadata_path=model_dir / _MODEL_METADATA_FILENAME,
+        )
+        torch.save(self.state_dict(), model_dir / _MODEL_STATE_FILENAME)
+
+    @classmethod
+    def load(
+        cls,
+        model_dir: Path | str,
+        device: str | torch.device = "cpu",
+    ) -> "AlphaGenome":
+        model_dir = Path(model_dir)
+        config = AlphaGenomeConfig.load(
+            cfg_path=model_dir / _MODEL_CONFIG_FILENAME,
+            metadata_path=model_dir / _MODEL_METADATA_FILENAME,
+        )
+        model = cls(config)
+        state_dict = torch.load(
+            model_dir / _MODEL_STATE_FILENAME,
+            map_location="cpu",
+            weights_only=True,
+        )
+        model.load_state_dict(state_dict)
+        return model.to(torch.device(device))
+
     def check_seq_len(self, seq_len: int):
         min_seq_len = (self.encoder_downsample_width**self.stages) * self.pair_downsample_width
         if seq_len < min_seq_len:
@@ -416,24 +479,83 @@ class AlphaGenome(nn.Module):
                 "(encoder_downsample_width^(stages) * pair_downsample_width)."
             )
     
-    @property
-    def _num_organisms(self) -> int:
-        return self.metadata.get_num_organisms()
+    def _head_is_enabled(self, head_name: str) -> bool:
+        return self.metadata.metadata["heads"][head_name].get("enabled", True)
+
+    def as_data_batch(
+        self,
+        data: ModelInput,
+        organism_index: OrganismIndex | None = None,
+    ) -> DataBatch:
+        """Normalize any supported model input into a new DataBatch."""
+        if isinstance(data, DataBatch):
+            batch = data
+            sequences = batch.dna_sequence
+            one_hot = batch.dna_sequence_one_hot
+        elif isinstance(data, torch.Tensor):
+            batch = DataBatch()
+            sequences, one_hot = None, data
+        elif isinstance(data, (str, Sequence)):
+            batch = DataBatch()
+            sequences, one_hot = data, None
+        else:
+            raise TypeError(
+                "Input data must be a DataBatch, torch.Tensor, str, "
+                "or sequence of str."
+            )
+
+        model_device = next(self.parameters()).device
+        sequences = _normalize_dna(sequences)
+        one_hot = _normalize_dna_one_hot(one_hot, torch.float32)
+        one_hot = self.dna_one_hot_encoder.get_dna_one_hot(
+            sequences,
+            one_hot,
+            torch.float32,
+        )
+        batch = replace(
+            batch,
+            dna_sequence=sequences,
+            dna_sequence_one_hot=one_hot,
+        )
+
+        organism = _normalize_organism_index(
+            batch,
+            organism_index,
+            self.num_organisms,
+            model_device,
+        )
+        batch = replace(batch, organism_index=organism)
+        return batch.to(model_device)
+
+    def _prepare_batch(
+        self,
+        data: ModelInput,
+        organism_index: OrganismIndex | None = None,
+    ) -> DataBatch:
+        batch = self.as_data_batch(data, organism_index)
+        dna_onehot = batch.dna_sequence_one_hot
+        assert dna_onehot is not None
+        _, seq_len, _ = dna_onehot.shape
+        self.check_seq_len(seq_len)
+        organism_index = batch.organism_index
+        assert organism_index is not None
+        return batch
 
     def predict_junctions(
         self,
         embeddings: Embeddings,                     # Embeddings object containing 1bp, 128bp, and pair embeddings
         splice_site_positions: torch.Tensor,        # [B, 4, K]
         organism_index: torch.Tensor,               # [B]
-        tissue_mask: torch.Tensor                   # [B, #A, #D, T]
-    ) -> torch.Tensor:
+        tissue_mask: torch.Tensor | None            # [B, #D, #A, T or 2*T]
+    ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings and splice site positions.
 
         Splice site positions has order: [donor_pos_idx, accept_pos_idx, donor_neg_idx, accept_neg_idx]
         """
-        junction_head = self._heads[HeadName.SPLICE_SITES_JUNCTION.value]
-        if junction_head is None:
+        junction_head_name = HeadName.SPLICE_SITES_JUNCTION.value
+        if junction_head_name not in self._heads:
             raise ValueError('Junction head is not supported by this model.')
+        junction_head = self._heads[junction_head_name]
         return junction_head(
             embeddings=embeddings,
             organism_index=organism_index,
@@ -441,24 +563,19 @@ class AlphaGenome(nn.Module):
             tissue_mask=tissue_mask,
         )
 
-    def forward(self, batch: DataBatch, return_embeddings: bool = True):
-        # Unpack batch
-        x = batch.dna_sequence                                                          # [B, S, 4]
-        B, S, _ = x.shape
-        if batch.organism_index is None:
-            organism_index = torch.zeros(B, dtype=torch.long, device=x.device)          # [B]
-        else:
-            organism_index = batch.organism_index.to(device=x.device, dtype=torch.long)  # [B]
+    def _embed_batch(self, batch: DataBatch) -> Embeddings:
+        """Compute output embeddings for an already normalized batch."""
+        if batch.dna_sequence_one_hot is None or batch.organism_index is None:
+            raise ValueError("A normalized batch requires DNA and organism data.")
+        x = batch.dna_sequence_one_hot
+        organism_index = batch.organism_index
 
-        # Check inputs
-        self.check_seq_len(S)
-        
         # Encode sequence with CNN encoder
         x = rearrange(x, 'b s c -> b c s')                                              # [B, 4, S]
         t, intermediates = self.sequence_encoder(x)                                     # [B, 4, S] --> x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] for U-Net skip connections
 
         # Add organism embedding
-        if self._num_organisms >= 1:
+        if self.num_organisms >= 1:
             org_embed = self.org_embedder(organism_index)
             t = add('b c s, b c -> b c s', t, org_embed)                                # [B, C', S'] + [B, C', 1] --> [B, C', S']
 
@@ -477,20 +594,25 @@ class AlphaGenome(nn.Module):
         embeddings_x = self.output_x(x, organism_index, skip_x=embeddings_t)            # [B, S, C'*M']
         embeddings_pair = self.output_pair(pair_activations, organism_index)            # [B, P, P, F]
 
-        # Collect embeddings
-        embeddings = Embeddings(
+        return Embeddings(
             embeddings_1bp=embeddings_x,
             embeddings_128bp=embeddings_t,
             embeddings_pair=embeddings_pair,
         )
-        predictions = {}
 
+    def _predict_from_embeddings(
+        self,
+        embeddings: Embeddings,
+        batch: DataBatch,
+    ) -> Predictions:
+        """Run enabled prediction heads on normalized data and embeddings."""
+        organism_index = batch.get_organism_index()
+        predictions: Predictions = {}
         for head_name, head_fn in self._heads.items():
-            if not self.metadata.metadata['heads'][head_name].get("enabled", True):
-                # If the head is not enabled, skip it
+            if not self._head_is_enabled(head_name):
                 continue
             if head_name == HeadName.SPLICE_SITES_JUNCTION.value:
-                # This head is handled separately (see below).
+                # This head is handled separately (see below)
                 continue
             predictions[head_name] = head_fn(
                 embeddings,
@@ -500,49 +622,177 @@ class AlphaGenome(nn.Module):
         # Handle the splice junction head separately. It requires splice site
         # positions as input, which are derived from the splice site
         # classification predictions.
-        junction_head = HeadName.SPLICE_SITES_JUNCTION.value
+        junction_head_name = HeadName.SPLICE_SITES_JUNCTION.value
         if (
-            junction_head in self._heads and 
-            self.metadata.metadata['heads'][junction_head].get("enabled", True)
+            junction_head_name in self._heads
+            and self._head_is_enabled(junction_head_name)
         ):
-            if (
-                HeadName.SPLICE_SITES_CLASSIFICATION.value not in self._heads or
-                not self.metadata.metadata['heads'][HeadName.SPLICE_SITES_CLASSIFICATION.value].get("enabled", True)
-            ):
-                raise ValueError(
-                    'SPLICE_SITES_CLASSIFICATION head is required for junctions'
-                    ' predictions.'
-                )
-            splice_sites_probabilities = predictions[
-                HeadName.SPLICE_SITES_CLASSIFICATION.value
-            ]['predictions']
-            splice_site_positions = generate_splice_site_positions(
-                splice_sites_probabilities,
-                alt=None,
-                splice_sites=None,
-                k=self.num_splice_sites,
-                pad_to_length=self.num_splice_sites,
-                threshold=self.splice_site_threshold,
-            )  # [B, 4, K]
-            predictions[junction_head] = self.predict_junctions(
-                embeddings, splice_site_positions, 
-                organism_index, tissue_mask=batch.splice_junctions_mask
-            )
-        if return_embeddings:
-            return predictions, embeddings
-        else:
-            return predictions
+            splice_site_positions = batch.splice_site_positions
+            if splice_site_positions is None:
+                if HeadName.SPLICE_SITES_CLASSIFICATION.value not in predictions:
+                    raise ValueError(
+                        "Enabling splice-site classification or passing \
+                            splice_site_positions is required for splice junctions."
+                    )
+                splice_sites_probabilities = predictions[
+                    HeadName.SPLICE_SITES_CLASSIFICATION.value
+                ]["predictions"]
+                splice_site_positions = generate_splice_site_positions(
+                    splice_sites_probabilities,
+                    alt=None,
+                    splice_sites=None,
+                    k=self.num_splice_sites,
+                    pad_to_length=self.num_splice_sites,
+                    threshold=self.splice_site_threshold,
+                )  # [B, 4, K]
 
-    def loss(self, batch: DataBatch):
-        predictions, _ = self(batch)
-        total_loss, all_scalars = 0.0, {}
-        for head_name, head_fn in self._heads.items():
-            if not self.metadata.metadata['heads'][head_name].get("enabled", True):
-                # If the head is not enabled, skip it
-                continue
-            scalars = head_fn.loss(predictions[head_name], batch)
-            all_scalars.update(
-                {f'{head_name}_{k}': v for k, v in scalars.items()}
+            splice_site_positions = _normalize_splice_site_positions(
+                splice_site_positions,
+                batch,
+            )  # [B, 4, K]
+
+            predictions[junction_head_name] = self.predict_junctions(
+                embeddings,
+                splice_site_positions,
+                organism_index,
+                tissue_mask=batch.splice_junctions_mask,
             )
-            total_loss += scalars['loss']
-        return total_loss, all_scalars, predictions
+
+        return predictions
+
+    def metric_tree_from_predictions(
+        self,
+        predictions: Predictions,
+        batch: DataBatch,
+    ) -> MetricTree:
+        """Compute losses from predictions and an already normalized batch.
+
+        Behavior:
+        - Heads < Predictions/Targets: Ignore them
+        - Heads > Predictions/Targets: Error (but make this work in later versions)
+
+        Why:
+        - Metric Trees must have identical structure to run `.add()`, so we cannot
+          have missing leaves in one tree and not the other.
+        """
+        head_losses: dict[str, MetricNode] = {}
+        for head_name, head in self._heads.items():
+            if not self._head_is_enabled(head_name):
+                continue
+            if head_name not in predictions:
+                raise ValueError(
+                    f"Predictions for enabled head {head_name!r} are missing."
+                )
+
+            # Each head validates that its required targets are present.
+            head_losses[head_name] = head.loss(predictions[head_name], batch)
+
+        if not head_losses:
+            raise ValueError("Cannot compute loss because no heads are enabled.")
+        return MetricTree(head_losses)
+
+    def forward(
+        self,
+        data: ModelInput,
+        organism_index: OrganismIndex | None = None,
+        *,
+        mode: Literal["embed", "predict", "loss"] = "predict",
+        return_predictions: bool | None = None,
+        return_embeddings: bool | None = None,
+    ) -> (
+        Embeddings
+        | Predictions
+        | tuple[Predictions, Embeddings]
+        | LossOutput
+    ):
+        """Embed DNA, predict from it, or compute losses with its targets."""
+        if mode not in {"embed", "predict", "loss"}:
+            raise ValueError(
+                "mode must be 'embed', 'predict', or 'loss', "
+                f"got {mode!r}."
+            )
+        if mode == "embed" and (
+            return_predictions is not None or return_embeddings is not None
+        ):
+            raise ValueError(
+                "return_predictions and return_embeddings do not apply to "
+                "mode='embed'."
+            )
+        if mode == "predict" and return_predictions is not None:
+            raise ValueError(
+                "return_predictions does not apply to mode='predict'; "
+                "predictions are always returned."
+            )
+        if mode == "loss" and not isinstance(data, DataBatch):
+            raise TypeError("Loss mode requires a DataBatch with targets.")
+
+        batch = self._prepare_batch(data, organism_index)
+        embeddings = self._embed_batch(batch)
+
+        if mode == "embed":
+            return embeddings
+
+        predictions = self._predict_from_embeddings(embeddings, batch)
+        if mode == "predict":
+            return (
+                (predictions, embeddings)
+                if return_embeddings
+                else predictions
+            )
+
+        # Loss mode
+        metric_tree = self.metric_tree_from_predictions(predictions, batch)
+        return LossOutput(
+            tree=metric_tree,
+            total=metric_tree.total_loss(),
+            predictions=predictions if return_predictions else None,
+            embeddings=embeddings if return_embeddings else None,
+        )
+
+    def embed(
+        self,
+        data: ModelInput,
+        organism_index: OrganismIndex | None = None,
+    ) -> Embeddings:
+        """Normalize input data and return the model's output embeddings."""
+        embeddings = self(data, organism_index, mode="embed")
+        assert isinstance(embeddings, Embeddings)
+        return embeddings
+
+    @torch.no_grad()
+    def predict(
+        self,
+        data: ModelInput,
+        organism_index: OrganismIndex | None = None,
+        *,
+        return_embeddings: bool = False,
+    ) -> Predictions | tuple[Predictions, Embeddings]:
+        output = self(
+            data,
+            organism_index,
+            mode="predict",
+            return_embeddings=return_embeddings,
+        )
+        if return_embeddings:
+            assert isinstance(output, tuple)
+        else:
+            assert isinstance(output, dict)
+        return output
+
+    def loss(
+        self,
+        data: DataBatch,
+        organism_index: OrganismIndex | None = None,
+        *,
+        return_predictions: bool = False,
+        return_embeddings: bool = False,
+    ) -> LossOutput:
+        output = self(
+            data,
+            organism_index,
+            mode="loss",
+            return_predictions=return_predictions,
+            return_embeddings=return_embeddings,
+        )
+        assert isinstance(output, LossOutput)
+        return output

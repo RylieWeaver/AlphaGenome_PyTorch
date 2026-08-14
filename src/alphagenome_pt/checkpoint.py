@@ -39,7 +39,7 @@ import torch
 from torch import nn
 
 # Internal
-from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, package_version
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, Metadata, package_version
 
 
 
@@ -916,7 +916,7 @@ def deepmind_metadata(
     return _load_metadata_json(metadata_path)
 
 
-def deepmind_config(metadata: dict | None = None):
+def deepmind_config(metadata: Metadata | dict | None = None):
     if metadata is None:
         metadata = deepmind_metadata()
 
@@ -942,7 +942,7 @@ def deepmind_config(metadata: dict | None = None):
 
 def deepmind_model(
     device: str | torch.device = "cpu",
-    metadata: dict | None = None,
+    metadata: Metadata | dict | None = None,
     *,
     load_state: bool = False,
     local_dir: str | Path | None = None,
@@ -961,6 +961,7 @@ def deepmind_model(
 ):
     if metadata is None:
         metadata = deepmind_metadata(
+            metadata_dir=local_dir,
             repo_id=repo_id,
             repo_dir=repo_dir,
             token=token,
