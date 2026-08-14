@@ -39,7 +39,9 @@ import torch
 from torch import nn
 
 # Internal
-from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, Metadata, package_version
+from .metadata import Metadata
+from .model import AlphaGenome, AlphaGenomeConfig
+from .utils import package_version
 
 
 

@@ -53,11 +53,13 @@ class DNAOneHotEncoder:
 
     def get_dna_one_hot(
         self,
-        sequences: Sequence[str] | None,
+        sequences: str | Sequence[str] | None,
         one_hot: torch.Tensor | None,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Return supplied one-hot DNA or encode raw sequences."""
+        if isinstance(sequences, str):
+            sequences = [sequences]
         if one_hot is None:
             if sequences is None:
                 raise ValueError("DNA input is required.")
