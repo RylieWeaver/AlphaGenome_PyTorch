@@ -1,13 +1,14 @@
 # External
 import torch
 
+# Internal
 from alphagenome_pt import (
     HeadName,
     synthetic_batch,
     synthetic_metadata,
     small_alphagenome,
 )
-from .helpers import assert_finite_scalars
+from .helpers import assert_finite_metric_tree
 
 
 def test_splice_site_usage_head():
@@ -16,9 +17,16 @@ def test_splice_site_usage_head():
 
     batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
 
-    total_loss, scalars, predictions = model.loss(batch)
+    result = model.loss(
+        batch,
+        return_predictions=True,
+    )
 
-    assert torch.isfinite(total_loss)
-    assert_finite_scalars(scalars)
-    assert "splice_sites_usage" in predictions
-    assert predictions["splice_sites_usage"]["predictions"].shape == batch.splice_site_usage.shape
+    assert result.predictions is not None
+    assert torch.isfinite(result.total)
+    assert_finite_metric_tree(result.tree)
+    assert "splice_sites_usage" in result.predictions
+    assert (
+        result.predictions["splice_sites_usage"]["predictions"].shape
+        == batch.splice_site_usage.shape
+    )

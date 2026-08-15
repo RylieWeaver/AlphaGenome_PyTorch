@@ -25,11 +25,14 @@ class Embeddings:
 
     def get_sequence_embeddings(self, resolution: int) -> torch.Tensor:
         if resolution == 128:
-            return self.embeddings_128bp
+            sequence_embeddings = self.embeddings_128bp
         elif resolution == 1:
-            return self.embeddings_1bp
+            sequence_embeddings = self.embeddings_1bp
         else:
             raise ValueError(f'Unsupported resolution: {resolution}')
+        if sequence_embeddings is None:
+            raise ValueError(f'Embeddings at {resolution} bp are not present.')
+        return sequence_embeddings
 
 
 class OutputEmbedder(nn.Module):

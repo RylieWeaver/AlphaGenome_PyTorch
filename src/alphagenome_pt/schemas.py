@@ -1,26 +1,28 @@
 # Provenance: PyTorch port of AlphaGenome (Google LLC) code (Apache-2.0). Modified by Rylie Weaver, 2026.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Imports"""
 # External
-from typing import Union
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 
 # Internal
-from .metadata import Metadata
 from . import bundles
 
+
+DNAInput = str | Sequence[str] | torch.Tensor
+OrganismIndex = int | Sequence[int] | torch.Tensor
 
 
 @dataclass
 class DataBatch:
     """Input batch for the model."""
 
-    dna_sequence: list[str] | None = None                       # [B, S, V]
+    dna_sequence: str | Sequence[str] | None = None             # [B]
+    dna_sequence_one_hot: torch.Tensor | None = None            # [B, S, 4]
     mlm: torch.Tensor | None = None                             # [B, S]
-    organism_index: torch.Tensor | None = None                  # [B]
+    organism_index: OrganismIndex | None = None                 # [B]
     atac: torch.Tensor | None = None                            # [B, S, C_ATAC]
     atac_mask: torch.Tensor | None = None                       # [B, #S, C_ATAC]
     dnase: torch.Tensor | None = None                           # [B, S, C_DNASE]
@@ -38,12 +40,12 @@ class DataBatch:
     cage_mask: torch.Tensor | None = None                       # [B, #S, C_CAGE]
     contact_maps: torch.Tensor | None = None                    # [B, S//2048, S//2048, C_CONTACT_MAPS]
     contact_maps_mask: torch.Tensor | None = None               # [B, #S//2048, #S//2048, C_CONTACT_MAPS]
-    splice_site_positions: torch.Tensor | None = None           # [B, 4, D]
+    splice_site_positions: torch.Tensor | None = None           # [B, 4, D/A]
     splice_sites: torch.Tensor | None = None                    # [B, S, C_SPLICE_SITES]
     splice_site_usage: torch.Tensor | None = None               # [B, S, C_SPLICE_SITE_USAGE]
     splice_site_usage_mask: torch.Tensor | None = None          # [B, #S, C_SPLICE_SITE_USAGE]
-    splice_junctions: torch.Tensor | None = None                # [B, D, A, C_SPLICE_JUNCTIONS]
-    splice_junctions_mask: torch.Tensor | None = None           # [B, #D, #A, C_SPLICE_JUNCTIONS]
+    splice_junctions: torch.Tensor | None = None                # [B, D, A, C_SPLICE_JUNCTIONS] (where C_SPLICE_JUNCTIONS = 2 Strands * Tissues)
+    splice_junctions_mask: torch.Tensor | None = None           # [B, #D, #A, C_SPLICE_JUNCTIONS or C_SPLICE_JUNCTIONS / 2]
 
     def get_organism_index(self) -> torch.Tensor:               # [B]
         """Returns the organism index data."""
@@ -54,8 +56,8 @@ class DataBatch:
     def get_genome_tracks(
         self,
         bundle: bundles.BundleName
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns the genome tracks data for the given bundle if present."""
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Returns genome-track targets and their optional batch mask."""
         match bundle:
             case bundles.BundleName.ATAC:
                 data, mask = self.atac, self.atac_mask
@@ -76,8 +78,8 @@ class DataBatch:
                     f'Unknown bundle name: {bundle!r}. Is it a genome tracks bundle?'
                 )
 
-        if data is None or mask is None:
-            raise ValueError(f'{bundle.name!r} data is not present in the batch.')
+        if data is None:
+            raise ValueError(f'{bundle.name!r} target is not present in the batch.')
         return data, mask
     
     def to(self, device: torch.device):
@@ -87,6 +89,9 @@ class DataBatch:
             if isinstance(value, torch.Tensor):
                 setattr(self, field, value.to(device))
         return self
+
+
+ModelInput = DNAInput | DataBatch
 
 
 @dataclass

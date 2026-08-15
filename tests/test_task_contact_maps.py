@@ -1,13 +1,14 @@
 # External
 import torch
 
+# Internal
 from alphagenome_pt import (
     HeadName,
     synthetic_batch,
     synthetic_metadata,
     small_alphagenome,
 )
-from .helpers import assert_finite_scalars
+from .helpers import assert_finite_metric_tree
 
 
 def test_contact_maps_head():
@@ -16,12 +17,16 @@ def test_contact_maps_head():
 
     batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
 
-    total_loss, scalars, predictions = model.loss(batch)
+    result = model.loss(
+        batch,
+        return_predictions=True,
+    )
 
-    assert torch.isfinite(total_loss)
-    assert_finite_scalars(scalars)
-    assert "contact_maps" in predictions
+    assert result.predictions is not None
+    assert torch.isfinite(result.total)
+    assert_finite_metric_tree(result.tree)
+    assert "contact_maps" in result.predictions
     assert (
-        predictions["contact_maps"]["predictions"].shape
+        result.predictions["contact_maps"]["predictions"].shape
         == batch.contact_maps.shape
     )
