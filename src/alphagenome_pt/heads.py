@@ -1055,10 +1055,28 @@ class SpliceSitesJunctionHead(Head):
             num_organisms=num_organisms,
         )
         shape = (self._num_organisms, 2, self._num_tissues, self._splice_site_channels)
-        self.pos_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.pos_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
+
+        # Match AlphaGenome Research's hk.initializers.TruncatedNormal(0.1):
+        # https://github.com/google-deepmind/alphagenome_research/blob/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d/src/alphagenome_research/model/heads.py#L1126-L1135
+        # Haiku defaults to a zero mean and truncates at +/-2 standard
+        # deviations, or [-0.2, 0.2] here:
+        # https://github.com/google-deepmind/dm-haiku/blob/v0.0.17/haiku/_src/initializers.py#L97-L134
+        def _truncated_normal_parameter() -> nn.Parameter:
+            parameter = nn.Parameter(torch.empty(shape))
+            rope_std = 0.1
+            nn.init.trunc_normal_(
+                parameter,
+                mean=0.0,
+                std=rope_std,
+                a=-2.0 * rope_std,
+                b=2.0 * rope_std,
+            )
+            return parameter
+
+        self.pos_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.pos_donor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_donor_logits_embeddings = _truncated_normal_parameter()
 
     def _get_track_mask(self, tissue_mask: torch.Tensor) -> torch.Tensor:       # [*, T]
         return torch.cat([tissue_mask, tissue_mask], dim=-1).to(torch.bool)     # [*, 2*T]

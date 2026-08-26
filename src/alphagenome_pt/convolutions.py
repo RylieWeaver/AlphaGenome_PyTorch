@@ -1,3 +1,6 @@
+# Standard library
+import math
+
 # External
 import torch
 import torch.nn as nn
@@ -31,10 +34,31 @@ class StandardizedConv1d(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = kernel_size
 
-        # Initialization
-        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size))
+        # Match AlphaGenome Research's hk.initializers.TruncatedNormal calls:
+        # https://github.com/google-deepmind/alphagenome_research/blob/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d/src/alphagenome_research/model/convolutions.py#L54-L98
+        # Haiku defaults to a zero mean and truncates at +/-2 standard
+        # deviations:
+        # https://github.com/google-deepmind/dm-haiku/blob/v0.0.17/haiku/_src/initializers.py#L97-L134
+        self.weight = nn.Parameter(torch.empty(out_channels, in_channels, kernel_size))
         self.scale = nn.Parameter(torch.ones(out_channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(out_channels))
+        self.bias = nn.Parameter(torch.empty(out_channels))
+        fan_in = kernel_size * in_channels
+        weight_std = 1.0 / math.sqrt(fan_in)
+        nn.init.trunc_normal_(
+            self.weight,
+            mean=0.0,
+            std=weight_std,
+            a=-2.0 * weight_std,
+            b=2.0 * weight_std,
+        )
+        bias_std = 1e-4
+        nn.init.trunc_normal_(
+            self.bias,
+            mean=0.0,
+            std=bias_std,
+            a=-2.0 * bias_std,
+            b=2.0 * bias_std,
+        )
 
     def forward(self, x):                                       # x: [B, C_in, S]
         # Setup
