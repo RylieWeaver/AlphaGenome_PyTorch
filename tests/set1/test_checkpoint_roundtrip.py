@@ -35,8 +35,8 @@ class TestStateDictRoundtrip:
 
         for (name, a), (_, b) in zip(m1.named_parameters(), m2.named_parameters()):
             torch.testing.assert_close(a, b, atol=0, rtol=0, msg=f"param {name}")
-        # Only persistent buffers are compared. 17 of this implementation's 68 buffers are
-        # registered non-persistent and never enter the state dict; see
+        # Only persistent buffers are compared. Some buffers are registered
+        # non-persistent and never enter the state dict; see
         # test_track_means_are_not_in_the_checkpoint below.
         persistent = set(m1.state_dict())
         ref = dict(m1.named_buffers())
@@ -50,7 +50,7 @@ class TestStateDictRoundtrip:
         m1, batch = build_with_batch()
         m1.eval()
         with torch.no_grad():
-            _, before = m1(batch)
+            before = m1.embed(batch)
 
         path = tmp_path / "model.pt"
         torch.save(m1.state_dict(), path)
@@ -60,7 +60,7 @@ class TestStateDictRoundtrip:
         m2.load_state_dict(torch.load(path, weights_only=True))
         m2.eval()
         with torch.no_grad():
-            _, after = m2(batch)
+            after = m2.embed(batch)
 
         torch.testing.assert_close(before.embeddings_1bp, after.embeddings_1bp,
                                    atol=0, rtol=0)
