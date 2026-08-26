@@ -61,9 +61,9 @@ To remove the intermediate dependency entirely, install `alphagenome_research` i
 
 The following were surfaced by the tests on their first run. Each is currently undocumented, and each is now pinned so that a change in behaviour is noticed rather than silently absorbed.
 
-**1. Seventeen of sixty-eight buffers are absent from `state_dict()`.**
+**1. Some buffers are absent from `state_dict()`.**
 
-`_track_means`, `_track_mask` and `_tissue_mask` are registered non-persistent. The model therefore cannot be restored from a checkpoint alone; it also requires the exact metadata it was constructed with. This appears intentional — metadata is the source of truth, and `checkpoint.py` retrieves state and metadata separately — but it is an undocumented coupling. Pinned in `test_checkpoint_roundtrip.py::test_track_means_are_not_in_the_checkpoint`. If these buffers are ever made persistent, that test should be removed.
+`_track_means` and `_track_mask` are registered non-persistent. The model therefore cannot be restored from a checkpoint alone; it also requires the exact metadata it was constructed with. This appears intentional — metadata is the source of truth, and `checkpoint.py` retrieves state and metadata separately — but it is an undocumented coupling. Pinned in `test_checkpoint_roundtrip.py::test_track_means_are_not_in_the_checkpoint`. If these buffers are ever made persistent, that test should be removed.
 
 **2. `StandardizedConv1d.weight` is zero-initialised.**
 

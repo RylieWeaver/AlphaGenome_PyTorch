@@ -23,7 +23,7 @@ class TestHeadSelection:
         metadata = synthetic_metadata((HeadName.ATAC, HeadName.DNASE))
         model = small_alphagenome(metadata)
         batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
-        _, _, predictions = model.loss(batch)
+        predictions = model(batch)
 
         assert "atac" in predictions
         assert "dnase" in predictions
@@ -34,13 +34,14 @@ class TestHeadSelection:
     def test_single_head_model_has_one_head(self):
         metadata = synthetic_metadata((HeadName.ATAC,))
         model = small_alphagenome(metadata)
-        _, _, predictions = model.loss(
-            synthetic_batch(metadata, seq_len=model.max_seq_len))
+        predictions = model(
+            synthetic_batch(metadata, seq_len=model.max_seq_len)
+        )
         assert list(predictions) == ["atac"]
 
     def test_all_heads_can_be_requested(self):
         model, batch = build_with_batch(ALL_HEADS)
-        _, _, predictions = model.loss(batch)
+        predictions = model(batch)
         expected = {h.value for h in ALL_HEADS}
         assert set(predictions) == expected
 

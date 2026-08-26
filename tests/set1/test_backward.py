@@ -2,8 +2,8 @@
 # tests/integration/test_backward.py (Apache-2.0). No golden numbers.
 #
 # Deviations from the source file:
-#   - genomicsxai/alphagenome-pytorch hand-rolls a compute_combined_loss helper; alphagenome_pt has model.loss(batch)
-#     built in, returning (total_loss, scalars, predictions)
+#   - genomicsxai/alphagenome-pytorch hand-rolls a compute_combined_loss helper;
+#     alphagenome_pt has model.loss(batch) built in, returning LossOutput
 #   - component names differ: genomicsxai/alphagenome-pytorch's MHABlock is this implementation's MHA, genomicsxai/alphagenome-pytorch's
 #     RMSBatchNorm is this implementation's BatchNorm(rms_norm=True)
 #   - added test_zero_init_starves_scale_params_on_the_first_step, which has no
@@ -50,11 +50,11 @@ class TestFullModelBackward:
         opt = torch.optim.Adam(model.parameters(), lr=1e-2)
 
         opt.zero_grad()
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
         opt.step()
 
         opt.zero_grad()
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
 
         dead = [n for n, p in model.named_parameters()
                 if p.grad is None or p.grad.norm() == 0]
@@ -64,7 +64,7 @@ class TestFullModelBackward:
     def test_no_nan_or_inf_in_any_gradient(self):
         model, batch = build_with_batch(ALL_HEADS)
         model.train()
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
         bad = [n for n, p in model.named_parameters()
                if p.grad is not None and not torch.isfinite(p.grad).all()]
         assert not bad, bad
@@ -74,7 +74,7 @@ class TestFullModelBackward:
         model.train()
         before = [p.detach().clone() for p in model.parameters()]
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
         opt.step()
         assert any(not torch.equal(a, b)
                    for a, b in zip(before, model.parameters()))
@@ -84,10 +84,11 @@ class TestFullModelBackward:
         # loss path had no coverage until now.
         model, batch = build_with_batch(ALL_HEADS)
         model.train()
-        total, scalars, predictions = model.loss(batch)
-        assert torch.isfinite(total)
-        assert len(predictions) == len(ALL_HEADS)
-        total.backward()
+        output = model.loss(batch, return_predictions=True)
+        assert torch.isfinite(output.total)
+        assert output.predictions is not None
+        assert len(output.predictions) == len(ALL_HEADS)
+        output.total.backward()
 
 
 class TestZeroInitialisation:
@@ -105,13 +106,13 @@ class TestZeroInitialisation:
         model.train()
         opt = torch.optim.Adam(model.parameters(), lr=1e-2)
 
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
         dead_before = sum(1 for p in model.parameters()
                           if p.grad is None or p.grad.norm() == 0)
         opt.step()
 
         opt.zero_grad()
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
         dead_after = sum(1 for p in model.parameters()
                          if p.grad is None or p.grad.norm() == 0)
 
@@ -127,7 +128,7 @@ class TestJunctionHeadGradients:
         # from its sweep for the same reason.
         model, batch = build_with_batch(ALL_HEADS)
         model.train()
-        model.loss(batch)[0].backward()
+        model.loss(batch).total.backward()
 
         junction = [(n, p) for n, p in model.named_parameters()
                     if n.startswith("_heads.splice_sites_junction.")]
@@ -138,9 +139,10 @@ class TestJunctionHeadGradients:
 
     def test_junction_head_runs_and_produces_a_finite_loss(self):
         model, batch = build_with_batch(ALL_HEADS)
-        total, scalars, predictions = model.loss(batch)
-        assert "splice_sites_junction" in predictions
-        assert torch.isfinite(total)
+        output = model.loss(batch, return_predictions=True)
+        assert output.predictions is not None
+        assert "splice_sites_junction" in output.predictions
+        assert torch.isfinite(output.total)
 
 
 class TestComponentGradients:
