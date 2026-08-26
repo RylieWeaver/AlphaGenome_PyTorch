@@ -10,48 +10,13 @@ from alphagenome_pt import (
     synthetic_batch,
     synthetic_metadata,
 )
-from alphagenome_pt.precision import (
-    DEEPMIND_DTYPE_POLICY,
-    FLOAT32_DTYPE_POLICY,
-    FLOAT64_DTYPE_POLICY,
-    dot_with_dtype_policy,
-    dtype_policy_context,
-)
-
-
-### HELPERS ###
-def _dot_inputs():
-    left = torch.linspace(-1, 1, 24).reshape(2, 3, 4)
-    right = torch.linspace(-0.5, 0.5, 40).reshape(2, 4, 5)
-    return left, right
+from alphagenome_pt.precision import FLOAT64_DTYPE_POLICY
 
 
 ### TESTS ###
 def test_policy_rejects_compute_uptype_narrower_than_compute_dtype():
     with pytest.raises(ValueError, match="at least as precise"):
         replace(FLOAT64_DTYPE_POLICY, compute_uptype=torch.float32)
-
-
-def test_float32_policy_overrides_outer_bfloat16_autocast():
-    left, right = _dot_inputs()
-
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        with dtype_policy_context(FLOAT32_DTYPE_POLICY, "cpu"):
-            actual = dot_with_dtype_policy(left, right)
-
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, torch.bmm(left, right), rtol=0, atol=0)
-
-
-def test_deepmind_policy_uses_bfloat16_operands_and_float32_output():
-    left, right = _dot_inputs()
-
-    with dtype_policy_context(DEEPMIND_DTYPE_POLICY, "cpu"):
-        actual = dot_with_dtype_policy(left, right)
-    expected = torch.bmm(left.bfloat16().float(), right.bfloat16().float())
-
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

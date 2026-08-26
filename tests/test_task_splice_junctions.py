@@ -44,6 +44,34 @@ def test_splice_junctions_head():
     )
 
 
+def test_splice_junctions_head_supports_backward():
+    torch.manual_seed(0)
+    metadata = synthetic_metadata(
+        (HeadName.SPLICE_SITES_CLASSIFICATION, HeadName.SPLICE_SITES_JUNCTION)
+    )
+    model = small_alphagenome(
+        metadata,
+        max_seq_len=2_048,
+        num_channels=16,
+        transformer_layers=1,
+        num_splice_sites=16,
+        sync_bn=False,
+    )
+    batch = synthetic_batch(
+        metadata,
+        seq_len=model.max_seq_len,
+        num_splice_sites=16,
+    )
+
+    output = model.loss(batch)
+    output.total.backward()
+
+    junction_head = model._heads[HeadName.SPLICE_SITES_JUNCTION.value]
+    assert junction_head.multiorg_linear.weight.grad is not None
+    assert junction_head.pos_donor_logits_embeddings.grad is not None
+    assert junction_head.pos_acceptor_logits_embeddings.grad is not None
+
+
 def test_splice_junction_loss_tree_combines_loss_components(monkeypatch):
     metadata = synthetic_metadata(
         (HeadName.SPLICE_SITES_CLASSIFICATION, HeadName.SPLICE_SITES_JUNCTION)

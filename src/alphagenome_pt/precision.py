@@ -166,29 +166,3 @@ def dtype_policy_context(policy: DtypePolicy, device_type: str):
     # though we'll probably keep using the same policy.
     finally:
         _ACTIVE_DTYPE_POLICY.reset(token)
-
-
-def dot_with_dtype_policy(
-    left: torch.Tensor,
-    right: torch.Tensor,
-) -> torch.Tensor:
-    """Apply the active policy's dtypes to a batched dot product."""
-    policy = _ACTIVE_DTYPE_POLICY.get()
-    left = left.to(policy.compute_dtype)
-    right = right.to(policy.compute_dtype)
-    if (
-        left.is_cuda
-        and policy.compute_dtype in (torch.float16, torch.bfloat16)
-        and policy.compute_uptype == torch.float32
-    ):
-        try:
-            return torch.bmm(left, right, out_dtype=policy.compute_uptype)
-        except TypeError:
-            pass
-
-    # Fallback: widen compute-dtype operands to the compute uptype.
-    with torch.autocast(device_type=left.device.type, enabled=False):
-        return torch.bmm(
-            left.to(policy.compute_uptype),
-            right.to(policy.compute_uptype),
-        )

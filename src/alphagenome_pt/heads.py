@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 # Internal
 from .attention import apply_rope
-from .precision import _ACTIVE_DTYPE_POLICY, dot_with_dtype_policy
+from .precision import _ACTIVE_DTYPE_POLICY
 from .metadata import Metadata
 from .schemas import Channels
 from . import bundles
@@ -463,14 +463,16 @@ class MultiOrganismLinear(nn.Module):
         w = get_param_for_index(self.weight, organism_index).to(x.dtype)
         b = get_param_for_index(self.bias, organism_index).to(x.dtype)
         num_inner_dims = x.ndim - 2
-        output_shape = (*x.shape[:-1], w.shape[-1])
         target_b_shape = (b.shape[0],) + (1,) * num_inner_dims + (b.shape[1],)
 
-        x = dot_with_dtype_policy(
-            x.reshape(x.shape[0], -1, x.shape[-1]),
-            w,
-        ).reshape(output_shape)
-        return x + b.reshape(target_b_shape)
+        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = torch.einsum(
+                "b...i,bij->b...j",
+                x.to(compute_uptype),
+                w.to(compute_uptype),
+            )
+        return x + b.to(compute_uptype).reshape(target_b_shape)
 
 
 def predictions_scaling(
@@ -1136,7 +1138,8 @@ class SpliceSitesJunctionHead(Head):
             return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
         def _apply_rope(x, indices, name: str):                                 # x: [B, S, C_splice] | indices: [B, P]
-            x = _index_embedding(x, indices).to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)                  # [B, P, C_splice]
+            compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+            x = _index_embedding(x, indices).to(compute_uptype)                 # [B, P, C_splice]
             params = get_param_for_index(
                 getattr(self, f"{name}_embeddings"), organism_index
             )                                                                   # [B, 2, T, C_splice]
@@ -1155,17 +1158,29 @@ class SpliceSitesJunctionHead(Head):
         neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
         neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
 
-        def _junction_dot(donor: torch.Tensor, acceptor: torch.Tensor):
-            batch, donors, tissues, channels = donor.shape
-            acceptors = acceptor.shape[1]
-            left = donor.permute(0, 2, 1, 3).reshape(-1, donors, channels)
-            right = acceptor.permute(0, 2, 3, 1).reshape(-1, channels, acceptors)
-            return dot_with_dtype_policy(left, right).reshape(
-                batch, tissues, donors, acceptors
-            ).permute(0, 2, 3, 1)
+        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
 
-        pos_counts = F.softplus(_junction_dot(pos_donor_logits, pos_accept_logits))
-        neg_counts = F.softplus(_junction_dot(neg_donor_logits, neg_accept_logits))
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Here, the donor and
+        # acceptor logits are already FP32 because `_apply_rope` produces FP32.
+        # Upcasting them therefore skips the BF16 operand rounding performed by
+        # JAX and may change results.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            pos_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    pos_donor_logits.to(compute_uptype),
+                    pos_accept_logits.to(compute_uptype),
+                )
+            )
+            neg_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    neg_donor_logits.to(compute_uptype),
+                    neg_accept_logits.to(compute_uptype),
+                )
+            )
 
         pos_mask = (pos_donor_idx >= 0)[:, :, None] & (
             pos_accept_idx >= 0

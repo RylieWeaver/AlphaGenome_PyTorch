@@ -32,13 +32,9 @@ from alphagenome_pt import heads as torch_heads
 from alphagenome_pt import layers as torch_layers
 from alphagenome_pt import losses as torch_losses
 from alphagenome_pt import splicing as torch_splicing
-from alphagenome_pt.precision import (
-    dot_with_dtype_policy,
-    dtype_policy_context,
-)
+from alphagenome_pt.precision import dtype_policy_context
 from .precision import (
     equivalence_criteria,
-    jax_dot_algorithm,
     jax_dtype,
     jax_mixed_precision_policy,
     use_jax_compute_uptype_policy,
@@ -647,31 +643,6 @@ def test_splice_site_positions(record_and_assert_close):
 
 
 ### ETC ###
-def test_dot_implementations(
-    pt_dtype_policy, record_and_assert_close
-):
-    left = normal_values(SEQUENCE_SHAPE, seed=0)
-    right = normal_values(ATTENTION_PROJECTION_SHAPE, seed=1)
-    with dtype_policy_context(pt_dtype_policy, "cpu"):
-        torch_output = dot_with_dtype_policy(
-            _torch_array(left, pt_dtype_policy.compute_dtype),
-            _torch_array(right, pt_dtype_policy.compute_dtype),
-        )
-    jax_operand_dtype = jax_dtype(pt_dtype_policy.compute_dtype)
-    jax_output = jnp.einsum(
-        "bqi,bik->bqk",
-        jnp.asarray(left, dtype=jax_operand_dtype),
-        jnp.asarray(right, dtype=jax_operand_dtype),
-        precision=jax_dot_algorithm(pt_dtype_policy),
-    )
-    record_and_assert_close(
-        torch_output,
-        jax_output,
-        dtype_policy=pt_dtype_policy.name,
-        **equivalence_criteria(pt_dtype_policy.name, "module"),
-    )
-
-
 def test_policy_compute_operand_cast(
     pt_dtype_policy, record_and_assert_close
 ):

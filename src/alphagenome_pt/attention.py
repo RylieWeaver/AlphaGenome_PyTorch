@@ -8,60 +8,8 @@ from einops import rearrange, repeat
 
 # Internal
 from .layers import BatchNorm, LayerNorm
-from .precision import dot_with_dtype_policy
+from .precision import _ACTIVE_DTYPE_POLICY
 
-
-
-def _mha_qk_dot(q, k):
-    batch, sequence, groups, heads, _ = q.shape
-    left = rearrange(q, 'b s g h c -> (b g h) s c')
-    right = rearrange(
-        k[:, None].expand(batch, groups, sequence, -1, -1),
-        'b g S h c -> (b g h) c S',
-    )
-    return rearrange(
-        dot_with_dtype_policy(left, right),
-        '(b g h) s S -> b g h s S',
-        b=batch, g=groups, h=heads,
-    )
-
-
-def _mha_av_dot(attention, values):
-    batch, groups, heads, sequence, _ = attention.shape
-    left = rearrange(attention, 'b g h s S -> (b g h) s S')
-    right = rearrange(
-        values[:, None].expand(batch, groups, sequence, -1, -1),
-        'b g S h c -> (b g h) S c',
-    )
-    return rearrange(
-        dot_with_dtype_policy(left, right),
-        '(b g h) s c -> b s g h c',
-        b=batch, g=groups, h=heads,
-    )
-
-
-def _row_qk_dot(q, k):
-    batch, rows = q.shape[:2]
-    return rearrange(
-        dot_with_dtype_policy(
-            rearrange(q, 'b p P f -> (b p) P f'),
-            rearrange(k, 'b p k f -> (b p) f k'),
-        ),
-        '(b p) P k -> b p P k',
-        b=batch, p=rows,
-    )
-
-
-def _row_av_dot(attention, values):
-    batch, rows = attention.shape[:2]
-    return rearrange(
-        dot_with_dtype_policy(
-            rearrange(attention, 'b p P k -> (b p) P k'),
-            rearrange(values, 'b p k f -> (b p) k f'),
-        ),
-        '(b p) P f -> b p P f',
-        b=batch, p=rows,
-    )
 
 
 def _shift(x):
@@ -235,7 +183,6 @@ class MHA(nn.Module):
     def forward(self, x, attn_bias=None):                                       # x: [B, S', C'] | attn_bias: [B, G, S', S']
         # Setup
         B, S, _ = x.shape
-        dtype = x.dtype
 
         # Initial normalization
         x = self.bn1(x)                                                         # [B, S', C']
@@ -262,17 +209,38 @@ class MHA(nn.Module):
         k = apply_rope(k, None, max_position=self.max_transformer_seq_len)      # [B, S', H_kv, C_qk]
 
         # Compute attention weights
-        logits = _mha_qk_dot(q, k) / (self.qk_head_dim ** 0.5)                          # [B, G, H_kv, S', S']
-        if attn_bias is not None:
-            logits = logits + attn_bias.float()                                         # [B, G, H_kv, S', S']
-        logits = torch.tanh(logits / self.logit_clip_value) * self.logit_clip_value
-        attn = torch.softmax(logits, dim=-1)                                            # [B, G, H_kv, S', S']
+        dtype_policy = _ACTIVE_DTYPE_POLICY.get()
+        compute_dtype = dtype_policy.compute_dtype
+        compute_uptype = dtype_policy.compute_uptype
+        with torch.autocast(device_type=q.device.type, enabled=False):
+            logits = torch.einsum(
+                "bsghc,bShc->bghsS",
+                q.to(compute_uptype),
+                k.to(compute_uptype),
+            ) / (self.qk_head_dim ** 0.5)                                       # [B, G, H_kv, S', S']
+            if attn_bias is not None:
+                logits = logits + attn_bias.to(compute_uptype)                  # [B, G, H_kv, S', S']
+        logits = (
+            torch.tanh(logits / self.logit_clip_value)
+            * self.logit_clip_value
+        )
+        attn = torch.softmax(logits, dim=-1)                                    # [B, G, H_kv, S', S']
 
-        # Output calculation (back to original dtype)
-        y = _mha_av_dot(attn, v).to(dtype)                                              # [B, S', G, H_kv, C_v]
-        y = rearrange(y, 'b s g h c -> b s (g h c)')                                    # [B, G, H_kv, S', C_v] --> [B, S', G, H_kv, C_v] --> [B, S', H_q * C_v]
-        y = self.out_drop(self.bn2(self.linear_embedding(y)))                           # [B, S', C]
-        return y                                                                        # [B, S', C]
+        # Output calculation (back to the compute dtype)
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Here, `attn` is already
+        # FP32 because it is produced by the FP32 softmax. Upcasting it therefore
+        # skips the BF16 operand rounding performed by JAX and may change results.
+        with torch.autocast(device_type=attn.device.type, enabled=False):
+            y = torch.einsum(
+                "bghsS,bShc->bsghc",
+                attn.to(compute_uptype),
+                v.to(compute_uptype),
+            ).to(compute_dtype)                                                 # [B, S', G, H_kv, C_v]
+        y = rearrange(y, 'b s g h c -> b s (g h c)')                            # [B, G, H_kv, S', C_v] --> [B, S', G, H_kv, C_v] --> [B, S', H_q * C_v]
+        y = self.out_drop(self.bn2(self.linear_embedding(y)))                   # [B, S', C]
+        return y                                                                # [B, S', C]
 
 
 class MLPBlock(nn.Module):
@@ -388,9 +356,6 @@ class RowAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(self.dropout)
 
     def forward(self, x):
-        # Setup
-        dtype = x.dtype
-
         # Normalize inputs
         x = self.norm(x)                                            # [B, P, P, F]
 
@@ -399,11 +364,31 @@ class RowAttentionBlock(nn.Module):
         k = self.linear_k(x)                                        # [B, P, P, F]
         v = self.linear_v(x)                                        # [B, P, P, F]
 
-        # Compute attention update (back to original dtype)
+        # Compute attention weights
         d = q.shape[-1]
-        logits = _row_qk_dot(q, k) / (d**0.5)                       # [B, P, P, P]
+        dtype_policy = _ACTIVE_DTYPE_POLICY.get()
+        compute_dtype = dtype_policy.compute_dtype
+        compute_uptype = dtype_policy.compute_uptype
+        with torch.autocast(device_type=q.device.type, enabled=False):
+            logits = torch.einsum(
+                "bpPf,bpkf->bpPk",
+                q.to(compute_uptype),
+                k.to(compute_uptype),
+            ) / (d**0.5)                                            # [B, P, P, P]
         a = torch.softmax(logits, dim=3)                            # [B, P, P, P]
-        x = _row_av_dot(a, v).to(dtype)                             # [B, P, P, F]
+
+        # Output calculation (back to the compute dtype)
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Here, `a` is already
+        # FP32 because it is produced by the FP32 softmax. Upcasting it therefore
+        # skips the BF16 operand rounding performed by JAX and may change results.
+        with torch.autocast(device_type=a.device.type, enabled=False):
+            x = torch.einsum(
+                "bpPk,bpkf->bpPf",
+                a.to(compute_uptype),
+                v.to(compute_uptype),
+            ).to(compute_dtype)                                     # [B, P, P, F]
 
         # Output
         x = self.dropout(x)                                         # [B, P, P, F]
