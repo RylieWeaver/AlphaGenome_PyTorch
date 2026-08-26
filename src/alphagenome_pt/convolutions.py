@@ -9,6 +9,7 @@ from einops import repeat
 
 # Internal
 from .layers import BatchNorm, GELU_1702
+from .precision import _ACTIVE_DTYPE_POLICY
 
 
 
@@ -63,12 +64,7 @@ class StandardizedConv1d(nn.Module):
     def forward(self, x):                                       # x: [B, C_in, S]
         # Setup
         fan_in = self.kernel_size * self.in_channels
-        device_type = x.device.type
-        compute_dtype = (
-            torch.get_autocast_dtype(device_type)
-            if torch.is_autocast_enabled(device_type)
-            else x.dtype
-        )
+        compute_dtype = _ACTIVE_DTYPE_POLICY.get().compute_dtype
         w = self.weight.to(compute_dtype)
         scale = self.scale.to(compute_dtype)
 
