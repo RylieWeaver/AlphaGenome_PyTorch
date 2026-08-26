@@ -8,7 +8,60 @@ from einops import rearrange, repeat
 
 # Internal
 from .layers import BatchNorm, LayerNorm
+from .precision import dot_with_dtype_policy
 
+
+
+def _mha_qk_dot(q, k):
+    batch, sequence, groups, heads, _ = q.shape
+    left = rearrange(q, 'b s g h c -> (b g h) s c')
+    right = rearrange(
+        k[:, None].expand(batch, groups, sequence, -1, -1),
+        'b g S h c -> (b g h) c S',
+    )
+    return rearrange(
+        dot_with_dtype_policy(left, right),
+        '(b g h) s S -> b g h s S',
+        b=batch, g=groups, h=heads,
+    )
+
+
+def _mha_av_dot(attention, values):
+    batch, groups, heads, sequence, _ = attention.shape
+    left = rearrange(attention, 'b g h s S -> (b g h) s S')
+    right = rearrange(
+        values[:, None].expand(batch, groups, sequence, -1, -1),
+        'b g S h c -> (b g h) S c',
+    )
+    return rearrange(
+        dot_with_dtype_policy(left, right),
+        '(b g h) s c -> b s g h c',
+        b=batch, g=groups, h=heads,
+    )
+
+
+def _row_qk_dot(q, k):
+    batch, rows = q.shape[:2]
+    return rearrange(
+        dot_with_dtype_policy(
+            rearrange(q, 'b p P f -> (b p) P f'),
+            rearrange(k, 'b p k f -> (b p) f k'),
+        ),
+        '(b p) P k -> b p P k',
+        b=batch, p=rows,
+    )
+
+
+def _row_av_dot(attention, values):
+    batch, rows = attention.shape[:2]
+    return rearrange(
+        dot_with_dtype_policy(
+            rearrange(attention, 'b p P k -> (b p) P k'),
+            rearrange(values, 'b p k f -> (b p) k f'),
+        ),
+        '(b p) P f -> b p P f',
+        b=batch, p=rows,
+    )
 
 
 def _shift(x):
@@ -42,7 +95,7 @@ def central_mask_features(rel, feature_size, max_sequence_length, device, dtype=
     # Make geometrically spaced thresholds for each feature
     widths_lin = torch.arange(half, device=device, dtype=dtype)                     # [F/2]
     if half > max_sequence_length:
-        widths_geo = torch.ones(half, device=device, dtype=dtype)                  # [F/2]
+        widths_geo = torch.ones(half, device=device, dtype=dtype)                   # [F/2]
     else:
         widths_geo = torch.tensor(
             np.geomspace(
@@ -105,7 +158,7 @@ def apply_rope(x: torch.Tensor, positions: torch.Tensor | None, max_position: in
 
         lin_space = torch.arange(num_freq, device=device, dtype=dtype)                          # [F]
         if num_freq > max_position:
-            geom_space = torch.ones(num_freq, device=device, dtype=dtype)                      # [F]
+            geom_space = torch.ones(num_freq, device=device, dtype=dtype)                       # [F]
         else:
             geom_space = geomspace(
                 1.0,
@@ -113,7 +166,7 @@ def apply_rope(x: torch.Tensor, positions: torch.Tensor | None, max_position: in
                 num_freq,
                 device=device,
                 dtype=dtype
-            )                                                                                       # [F]
+            )                                                                                   # [F]
         inv_freq = 1.0 / (lin_space + geom_space)                                               # [F]
 
         # Compute angles
@@ -208,18 +261,15 @@ class MHA(nn.Module):
         q = apply_rope(q, None, max_position=self.max_transformer_seq_len)      # [B, S', G, H_kv, C_qk]
         k = apply_rope(k, None, max_position=self.max_transformer_seq_len)      # [B, S', H_kv, C_qk]
 
-        # Demand upcast to float32 for sensitive ops
-        q, k, v = q.float(), k.float(), v.float()
-
         # Compute attention weights
-        logits = torch.einsum('bsghc,bShc->bghsS', q, k) / (self.qk_head_dim ** 0.5)    # [B, G, H_kv, S', S']
+        logits = _mha_qk_dot(q, k) / (self.qk_head_dim ** 0.5)                          # [B, G, H_kv, S', S']
         if attn_bias is not None:
             logits = logits + attn_bias.float()                                         # [B, G, H_kv, S', S']
         logits = torch.tanh(logits / self.logit_clip_value) * self.logit_clip_value
         attn = torch.softmax(logits, dim=-1)                                            # [B, G, H_kv, S', S']
 
         # Output calculation (back to original dtype)
-        y = torch.einsum('bghsS,bShc->bsghc', attn, v).to(dtype)                        # [B, G, H_kv, S', C_v]
+        y = _mha_av_dot(attn, v).to(dtype)                                              # [B, S', G, H_kv, C_v]
         y = rearrange(y, 'b s g h c -> b s (g h c)')                                    # [B, G, H_kv, S', C_v] --> [B, S', G, H_kv, C_v] --> [B, S', H_q * C_v]
         y = self.out_drop(self.bn2(self.linear_embedding(y)))                           # [B, S', C]
         return y                                                                        # [B, S', C]
@@ -263,7 +313,11 @@ class PairMLPBlock(nn.Module):
         self.sync_bn = sync_bn
 
         # Modules
-        self.norm = LayerNorm(self.pair_channels, channels_dim=3)
+        self.norm = LayerNorm(
+            self.pair_channels,
+            channels_dim=3,
+            rms_norm=True,
+        )
         self.fc1 = nn.Linear(self.pair_channels, self.pair_channels * self.mlp_ratio)
         self.act = nn.ReLU()
         self.fc2 = nn.Linear(self.pair_channels * self.mlp_ratio, self.pair_channels)
@@ -288,7 +342,8 @@ class AttentionBiasBlock(nn.Module):
         self.head_group_size = num_q_heads // num_kv_heads                              # G = H_q // H_kv
         self.sync_bn = sync_bn
         self.bn = BatchNorm(self.pair_channels, sync=self.sync_bn, channels_dim=3)
-        self.act = nn.GELU()
+        # Match JAX's tanh-approximated GELU rather than PyTorch's default erf form.
+        self.act = nn.GELU(approximate="tanh")
         self.fc = nn.Linear(self.pair_channels, self.num_q_heads, bias=False)
 
     def forward(self, x):                                                               # [B, P, P, F]
@@ -309,7 +364,12 @@ class RowAttentionBlock(nn.Module):
     Input/Output: [B, P, P, F]
       - For each row i, attend across columns j∈[0..P-1].
     """
-    def __init__(self, pair_channels, dropout, sync_bn=True):
+    def __init__(
+        self,
+        pair_channels,
+        dropout,
+        sync_bn=True,
+    ):
         super().__init__()
         # Read inputs
         self.pair_channels = pair_channels      # F
@@ -332,24 +392,21 @@ class RowAttentionBlock(nn.Module):
         dtype = x.dtype
 
         # Normalize inputs
-        x = self.norm(x)                                                    # [B, P, P, F]
+        x = self.norm(x)                                            # [B, P, P, F]
 
-        # Reshape to treat each row independently and project
-        q = self.linear_q(x)                                                # [B, P, P, F]
-        k = self.linear_k(x)                                                # [B, P, P, F]
-        v = self.linear_v(x)                                                # [B, P, P, F]
-
-        # Demand upcast to float32 for sensitive ops
-        q, k, v = q.float(), k.float(), v.float()
+        # Project
+        q = self.linear_q(x)                                        # [B, P, P, F]
+        k = self.linear_k(x)                                        # [B, P, P, F]
+        v = self.linear_v(x)                                        # [B, P, P, F]
 
         # Compute attention update (back to original dtype)
         d = q.shape[-1]
-        logits = torch.einsum('bpPf,bpkf->bpPk', q, k) / (d**0.5)           # [B, P, P, P]
-        a = torch.softmax(logits, dim=3)                                    # [B, P, P, P]
-        x = torch.einsum('bpPk,bpkf->bpPf', a, v).to(dtype)                 # [B, P, P, F]
+        logits = _row_qk_dot(q, k) / (d**0.5)                       # [B, P, P, P]
+        a = torch.softmax(logits, dim=3)                            # [B, P, P, P]
+        x = _row_av_dot(a, v).to(dtype)                             # [B, P, P, F]
 
         # Output
-        x = self.dropout(x)                                                 # [B, P, P, F]
+        x = self.dropout(x)                                         # [B, P, P, F]
         return x
 
 
@@ -386,7 +443,8 @@ class SequenceToPairBlock(nn.Module):
         self.k_r_bias = nn.Parameter(torch.zeros(1, 1, self.pair_heads, self.pair_channels))
 
         # Output
-        self.act = nn.GELU()
+        # Match JAX's tanh-approximated GELU rather than PyTorch's default erf form.
+        self.act = nn.GELU(approximate="tanh")
         self.linear_y_q = nn.Linear(self.num_channels, self.pair_channels, bias=False)
         self.linear_y_k = nn.Linear(self.num_channels, self.pair_channels, bias=False)
         self.linear_pair = nn.Linear(self.pair_heads, self.pair_channels)
@@ -413,7 +471,7 @@ class SequenceToPairBlock(nn.Module):
         relative_positions = torch.arange(-P, P, device=device)                                             # [2P] ([-L, ..., -1, 0, 1, ..., L-1])
         pos_features = central_mask_features(
             rel=relative_positions, feature_size=self.pos_channels,                                         # [2P, C_p]
-            max_sequence_length=P, device=device, dtype=dtype
+            max_sequence_length=self.max_pair_seq_len, device=device, dtype=dtype
         )
         pos_encoding = self.linear_pos_features(pos_features).reshape(2*P, H, F)                            # [2P, H_p, F]
         rel_q_a = torch.einsum('bqhc,phc->bqph', q + self.q_r_bias, pos_encoding)                           # [B, P, 2P, H_p]
@@ -457,7 +515,7 @@ class PairUpdateBlock(nn.Module):
         self.row_attention_block = RowAttentionBlock(
             pair_channels=self.pair_channels,
             dropout=self.dropout,
-            sync_bn=self.sync_bn
+            sync_bn=self.sync_bn,
         )
         self.pair_mlp_block = PairMLPBlock(
             pair_channels=self.pair_channels,
@@ -523,14 +581,14 @@ class TransformerTowerBlock(nn.Module):
                 pos_channels=self.pos_channels,
                 mlp_ratio=self.mlp_ratio,
                 dropout=self.dropout,
-                sync_bn=self.sync_bn
+                sync_bn=self.sync_bn,
             )
         self.attn_bias = AttentionBiasBlock(
             pair_channels=self.pair_channels,
             pair_downsample_width=self.pair_downsample_width,
             num_q_heads=self.num_q_heads,
             num_kv_heads=self.num_kv_heads,
-            sync_bn=self.sync_bn
+            sync_bn=self.sync_bn,
         )
         self.mha = MHA(
             self.num_channels,
@@ -540,7 +598,7 @@ class TransformerTowerBlock(nn.Module):
             self.qk_head_dim,
             self.v_head_dim,
             self.dropout,
-            sync_bn=self.sync_bn
+            sync_bn=self.sync_bn,
         )
         self.mlp = MLPBlock(
             num_channels=self.num_channels,

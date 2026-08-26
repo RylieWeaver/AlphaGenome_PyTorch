@@ -918,7 +918,11 @@ def deepmind_metadata(
     return _load_metadata_json(metadata_path)
 
 
-def deepmind_config(metadata: Metadata | dict | None = None):
+def deepmind_config(
+    metadata: Metadata | dict | None = None,
+    *,
+    dtype_policy: str = "deepmind",
+):
     if metadata is None:
         metadata = deepmind_metadata()
 
@@ -935,9 +939,12 @@ def deepmind_config(metadata: Metadata | dict | None = None):
         pair_heads=32,
         pos_channels=64,
         transformer_mlp_ratio=2,
+        init_scale=0.1,
         embedder_mlp_ratio=2,
         num_splice_sites=512,
         splice_site_channels=768,
+        min_zero_multinomial_loss=False,
+        dtype_policy=dtype_policy,
         metadata=metadata,
     )
 
@@ -946,6 +953,7 @@ def deepmind_model(
     device: str | torch.device = "cpu",
     metadata: Metadata | dict | None = None,
     *,
+    dtype_policy: str = "deepmind",
     load_state: bool = False,
     local_dir: str | Path | None = None,
     local_filename: str | None = None,
@@ -969,7 +977,9 @@ def deepmind_model(
             token=token,
             force_download=force_download,
         )
-    model = AlphaGenome(deepmind_config(metadata=metadata))
+    model = AlphaGenome(
+        deepmind_config(metadata=metadata, dtype_policy=dtype_policy)
+    )
     if load_state:
         load_deepmind_state(
             model,

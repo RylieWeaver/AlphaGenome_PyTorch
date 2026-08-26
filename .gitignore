@@ -1,6 +1,10 @@
 __pycache__/
+.venv/
 *.pt
 *.pth
 .vscode/
 launch.json
 docs/_build/
+scratch/
+
+tests/deepmind_equivalence/dna/

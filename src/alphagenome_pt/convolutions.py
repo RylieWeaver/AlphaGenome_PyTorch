@@ -36,16 +36,27 @@ class StandardizedConv1d(nn.Module):
         self.scale = nn.Parameter(torch.ones(out_channels, 1, 1))
         self.bias = nn.Parameter(torch.zeros(out_channels))
 
-    def forward(self, x):                               # x: [B, C_in, S]
+    def forward(self, x):                                       # x: [B, C_in, S]
         # Setup
         fan_in = self.kernel_size * self.in_channels
-        w = self.weight
+        device_type = x.device.type
+        compute_dtype = (
+            torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else x.dtype
+        )
+        w = self.weight.to(compute_dtype)
+        scale = self.scale.to(compute_dtype)
 
         # Normalize weights
-        w = w - w.mean(dim=(1, 2), keepdim=True)        # [C_out, C_in, K]
-        var_w = w.var(dim=(1, 2), keepdim=True)         # [C_out, 1, 1]
-        w_scale = self.scale * torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
-        w_standardized = w * w_scale                    # [C_out, C_in, K]
+        w = w - w.mean(dim=(1, 2), keepdim=True)                # [C_out, C_in, K]
+        # JAX uses population variance (correction=0)
+        var_w = w.var(dim=(1, 2), correction=0, keepdim=True)   # [C_out, 1, 1]
+        w_scale = (
+            scale *
+            torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
+        )
+        w_standardized = w * w_scale                            # [C_out, C_in, K]
 
         # Apply conv1d with normalized weights
         out = F.conv1d(

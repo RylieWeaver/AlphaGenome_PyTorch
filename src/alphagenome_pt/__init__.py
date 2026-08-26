@@ -7,6 +7,13 @@ from .metadata import Metadata
 from .embeddings import Embeddings
 from .losses import LossLeaf, MetricTree
 from .model import AlphaGenome, AlphaGenomeConfig, LossOutput, SequenceEncoder
+from .precision import (
+    DEEPMIND_DTYPE_POLICY,
+    FLOAT32_DTYPE_POLICY,
+    FLOAT64_DTYPE_POLICY,
+    DtypePolicy,
+    get_dtype_policy,
+)
 from .one_hot_encoder import DNAOneHotEncoder
 from .synthetic import (
     small_alphagenome,
@@ -61,6 +68,7 @@ __all__ = [
     "AlphaGenomeConfig",
     "BundleName",
     "DataBatch",
+    "DEEPMIND_DTYPE_POLICY",
     "DNAOneHotEncoder",
     "DEFAULT_ALPHAGENOME_REPO_ID",
     "DEFAULT_CONVERTED_METADATA_FILENAME",
@@ -70,8 +78,11 @@ __all__ = [
     "FOLD_NAMES",
     "FoldName",
     "Embeddings",
+    "FLOAT32_DTYPE_POLICY",
+    "FLOAT64_DTYPE_POLICY",
     "HeadLoadSpec",
     "HeadName",
+    "DtypePolicy",
     "LossLeaf",
     "LossOutput",
     "MetricTree",
@@ -91,6 +102,7 @@ __all__ = [
     "dist_print",
     "dist_sum",
     "fold_filename",
+    "get_dtype_policy",
     "is_dist",
     "is_rank0",
     "load_deepmind_state",

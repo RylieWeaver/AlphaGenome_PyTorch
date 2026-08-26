@@ -88,6 +88,21 @@ Check your installation and download PyTorch-converted checkpoints.
 
 ::::
 
+## Verification
+
+::::{grid} 1 1 1 1
+:gutter: 3
+
+:::{grid-item-card} DeepMind JAX Equivalence
+:link: deepmind-equivalence
+:link-type: doc
+:class-card: sd-card-hover
+
+See how JAX-PyTorch equivalence with the published DeepMind checkpoints is verified.
+:::
+
+::::
+
 ## Development
 
 ::::{grid} 1 1 2 2
@@ -122,5 +137,6 @@ background/index
 model/construction
 model/running
 cli
+deepmind-equivalence
 development/index
 ```

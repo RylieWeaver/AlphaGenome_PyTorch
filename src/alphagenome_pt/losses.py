@@ -8,6 +8,9 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
 
+# Internal
+from .precision import _ACTIVE_DTYPE_POLICY
+
 
 
 class LossLeaf:
@@ -254,7 +257,7 @@ def _safe_masked_mean(
         mask = mask.to(x.dtype)
         masked = x * mask
 
-    return torch.sum(masked, dtype=torch.float32) / torch.clamp(torch.sum(mask, dtype=torch.float32), min=1.0)
+    return torch.sum(masked, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype) / torch.clamp(torch.sum(mask, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype), min=1.0)
 
 
 def poisson_loss(
@@ -264,8 +267,8 @@ def poisson_loss(
     mask: torch.Tensor | None = None,       # [#*]
 ) -> torch.Tensor:
     """Poisson loss with fixed dtype and shift to have min_loss = 0."""
-    y_true = torch.abs(y_true).to(torch.float32)
-    y_pred = y_pred.to(torch.float32)
+    y_true = torch.abs(y_true).to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
     y_pred_logits = torch.log(y_pred + 1e-7)
     # Substract the minimum value such that loss is zero at optimal prediction.
     min_value = y_true - y_true * torch.log(y_true + 1e-7)
@@ -293,7 +296,7 @@ def multinomial_loss(
     # Setup
     *extra_dims, S, C = y_pred.shape
     S_sub = multinomial_resolution
-    dtype = torch.float32
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
     y_true = y_true.to(dtype)
     y_pred = y_pred.to(dtype)
     mask = mask.to(dtype)
@@ -359,9 +362,9 @@ def cross_entropy_loss_from_logits(
 ) -> torch.Tensor:
     """Cross-entropy loss from logits."""
     log_softmax_preds = F.log_softmax(
-        y_pred_logits.to(torch.float32), dim=axis
+        y_pred_logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), dim=axis
     )
-    loss = -torch.sum(y_true.to(torch.float32) * log_softmax_preds, dim=axis)
+    loss = -torch.sum(y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) * log_softmax_preds, dim=axis)
     if mask is not None:
         mask = torch.any(mask, dim=axis)
     return _safe_masked_mean(loss, mask)
@@ -396,10 +399,11 @@ def cross_entropy_loss(
     else:
         mask = mask.expand_as(y_true).to(torch.bool)
 
-    y_true = torch.where(mask, y_true.to(torch.float32), torch.zeros_like(y_true, dtype=torch.float32))
-    p_true = y_true / torch.clamp(torch.sum(y_true, dim=axis, keepdim=True), min=eps)
-
-    log_normalizer = torch.log((torch.where(mask, y_pred.to(torch.float32), torch.zeros_like(y_pred, dtype=torch.float32)) + eps).sum(dim=axis))
-    log_likelihood = torch.sum(p_true * torch.log(y_pred + eps), dim=axis)
-    log_loss = log_normalizer - log_likelihood
-    return _safe_masked_mean(log_loss, mask.any(dim=axis))
+    y_true = y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
+    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
+    axis_mask = mask.any(dim=axis, keepdim=True)
+    mask = torch.where(axis_mask, mask, True)
+    p_true = y_true / y_true.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    p_pred = y_pred / y_pred.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    log_loss = (-p_true * torch.log(p_pred)).masked_fill(~mask, 0).sum(dim=axis)
+    return _safe_masked_mean(log_loss, axis_mask.squeeze(dim=axis))

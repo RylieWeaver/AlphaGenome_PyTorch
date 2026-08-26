@@ -73,7 +73,9 @@ def test_splice_junction_loss_tree_combines_loss_components(monkeypatch):
     result = model.loss(batch)
 
     # Both the acceptor and donor contribute one count and one ratio loss.
-    expected = 2 * (
+    # The official head weight applies to every term, while its internal
+    # total-count weight applies only to the count terms.
+    expected = 0.2 * 2 * (
         components["ratio"] + 0.2 * components["total_count"]
     )
     torch.testing.assert_close(
@@ -114,13 +116,11 @@ def test_explicit_positions_do_not_require_classification_predictions():
         ).reshape(1, 1, 1, 8),
     ),
 )
-def test_splice_junction_mask_accepts_tissue_or_target_channels(junction_mask):
+def test_splice_junction_target_mask_does_not_change_prediction_mask(junction_mask):
     head_name = HeadName.SPLICE_SITES_JUNCTION.value
     metadata = synthetic_metadata(
         (HeadName.SPLICE_SITES_CLASSIFICATION, HeadName.SPLICE_SITES_JUNCTION)
     )
-    metadata_tissue_mask = torch.tensor([True, True, False, True])
-    metadata.metadata["heads"][head_name]["tissue_mask"][0] = metadata_tissue_mask
     model = small_alphagenome(metadata)
     batch = synthetic_batch(
         metadata,
@@ -128,21 +128,44 @@ def test_splice_junction_mask_accepts_tissue_or_target_channels(junction_mask):
         seq_len=model.max_seq_len,
         num_splice_sites=model.num_splice_sites,
     )
+
     batch.splice_junctions_mask = junction_mask
+    masked_predictions = model.predict(batch)
 
-    predictions = model.predict(batch)
+    batch.splice_junctions_mask = torch.ones_like(junction_mask)
+    unmasked_predictions = model.predict(batch)
 
-    prediction_mask = predictions[head_name]["splice_junction_mask"]
-    expected = (
-        torch.cat([junction_mask, junction_mask], dim=-1)
-        if junction_mask.shape[-1] == 4
-        else junction_mask
+    assert torch.equal(
+        masked_predictions[head_name]["splice_junction_mask"],
+        unmasked_predictions[head_name]["splice_junction_mask"],
     )
+
+
+def test_splice_junction_metadata_mask_limits_predictions():
+    head_name = HeadName.SPLICE_SITES_JUNCTION.value
+    metadata = synthetic_metadata(
+        (HeadName.SPLICE_SITES_CLASSIFICATION, HeadName.SPLICE_SITES_JUNCTION)
+    )
+    metadata_tissue_mask = torch.tensor([True, True, False, True])
+    metadata.metadata["heads"][head_name]["tissue_mask"][0] = (
+        metadata_tissue_mask
+    )
+    model = small_alphagenome(metadata)
+    batch = synthetic_batch(
+        metadata,
+        batch_size=1,
+        seq_len=model.max_seq_len,
+        num_splice_sites=model.num_splice_sites,
+    )
+    batch.splice_junctions_mask = None
+
+    prediction_mask = model.predict(batch)[head_name]["splice_junction_mask"]
     metadata_track_mask = torch.cat(
         [metadata_tissue_mask, metadata_tissue_mask]
-    ).reshape(1, 1, 1, -1)
-    expected = expected & metadata_track_mask
-    assert torch.equal(prediction_mask, expected.expand_as(prediction_mask))
+    )
+    invalid_tracks = ~metadata_track_mask
+
+    assert not prediction_mask[..., invalid_tracks].any()
 
 
 @pytest.mark.parametrize(

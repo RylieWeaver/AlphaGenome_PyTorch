@@ -125,6 +125,53 @@ The numbers of encoder/decoder stages and their pooling/upsampling factors are f
 
 These settings do not affect checkpoint compatibility. `dropout` and `sync_bn` are inactive in evaluation mode, while `min_zero_multinomial_loss` affects only loss computation. Setting it to `False` matches the released JAX loss definition.
 
+
+## Precision and Dtype Policies
+
+A dtype policy controls floating-point operations throughout the model
+and can be chosen during any model construction:
+`AlphaGenomeConfig`:
+
+```{code-block} python
+from alphagenome_pt import AlphaGenome, AlphaGenomeConfig, deepmind_model
+
+published_model = deepmind_model(
+    load_state=True,
+    dtype_policy="deepmind",
+)
+
+custom_model = AlphaGenome(
+    AlphaGenomeConfig(
+        metadata=metadata,
+        dtype_policy="deepmind",
+    )
+)
+```
+
+| Policy | Parameters | Inputs | General compute | Selected upcasts | Outputs |
+| --- | --- | --- | --- | --- | --- |
+| `deepmind` | FP32 | FP32 | BF16 | FP32 | BF16 |
+| `fp32_params_bf16_compute_fp32_compute_uptype_bf16_output` | FP32 | FP32 | BF16 | FP32 | BF16 |
+| `bfloat16` | BF16 | BF16 | BF16 | FP32 | BF16 |
+| `float32` | FP32 | FP32 | FP32 | FP32 | FP32 |
+| `float64` | FP64 | FP64 | FP64 | FP64 | FP64 |
+
+:::{dropdown} Dtype policies
+:class: note
+The dtype policies balance computational speed/memory and numerical precision.
+`deepmind` is the default and matches the published JAX mixed-precision policy.
+`float64` offers the highest precision but is intended mainly for numerical
+validation because it requires the most time and memory.
+:::
+
+:::{dropdown} What Is Affected by Compute Uptype?
+:class: note
+The compute uptype is generally used to upcast numerically sensitive operations
+(e.g., normalization statistics, attention and splice-junction dot-product
+accumulations, softmax, and loss reductions).
+:::
+
+
 ## Save and Load a Configuration
 
 `AlphaGenomeConfig.save()` and `AlphaGenomeConfig.load()` round-trip the
