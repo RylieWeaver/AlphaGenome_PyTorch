@@ -3,10 +3,10 @@
 # No golden numbers. Every assertion compares the model against itself.
 #
 # Deviations from the source file:
-#   - genomicsxai/alphagenome-pytorch builds the full model with DtypePolicy.full_float32(); alphagenome_pt has no
-#     DtypePolicy, so this uses small_alphagenome instead
-#   - genomicsxai/alphagenome-pytorch calls model(onehot, organism_index); alphagenome_pt calls model(DataBatch)
-#     and returns (predictions, embeddings), so outputs are compared via embeddings
+#   - genomicsxai/alphagenome-pytorch builds the full model; this uses
+#     small_alphagenome with its default dtype policy instead
+#   - genomicsxai/alphagenome-pytorch calls model(onehot, organism_index); this
+#     implementation accepts DataBatch and exposes embeddings through model.embed
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.integration
 
 def _embeddings(model, batch):
     with torch.no_grad():
-        _, emb = model(batch)
+        emb = model.embed(batch)
     return [emb.embeddings_1bp, emb.embeddings_128bp, emb.embeddings_pair]
 
 
