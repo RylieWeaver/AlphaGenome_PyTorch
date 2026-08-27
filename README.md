@@ -13,9 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="docs/installation.md">Installation</a> &middot;
-  <a href="docs/quickstart.md">Quickstart</a> &middot;
-  <a href="docs/index.md">Documentation</a> &middot;
+  <a href="https://alphagenome-pytorch-alphagenome-pt.readthedocs.io/en/latest/installation.html">Installation</a> &middot;
+  <a href="https://alphagenome-pytorch-alphagenome-pt.readthedocs.io/en/latest/quickstart.html">Quickstart</a> &middot;
+  <a href="https://alphagenome-pytorch-alphagenome-pt.readthedocs.io/en/latest/">Documentation</a> &middot;
   <a href="https://github.com/RylieWeaver/AlphaGenome_PyTorch/issues">Issues</a>
 </p>
 
