@@ -21,7 +21,7 @@
 
 <p align="center">
   <img
-    src="images/AG_PyTorch.png"
+    src="https://raw.githubusercontent.com/RylieWeaver/AlphaGenome_PyTorch/main/images/AG_PyTorch.png"
     width="680"
     alt="AlphaGenome PyTorch logo over an illustration of DNA and a neural network"
   >
@@ -154,14 +154,16 @@ torch.Size([1, 4, 4, 128])
 
 <br>
 
-> [!NOTE]
+> **Note**
+>
 > When the artifacts are not already cached,
 > `deepmind_model(load_state=True)` downloads the published metadata and a
 > roughly 1.8 GB checkpoint.
 > See [DeepMind Checkpoints](docs/model/deepmind-checkpoints.md) for
 > loading arguments and behavior.
 
-> [!WARNING]
+> **Warning**
+>
 > Sequences must be at least 2,048 bp, divisible by 2,048, and no longer than
 > `model.max_seq_len`. See
 > [Data and Metadata](docs/background/data-and-metadata.md) for the
@@ -345,7 +347,8 @@ Choose the call based on its return value and gradient behavior:
 | `model.predict(data, return_embeddings=True)` | `(predictions, embeddings)` | Disabled |
 | `model(batch, mode="loss")` | `LossOutput` | Current context |
 
-> [!WARNING]
+> **Warning**
+>
 > During DDP training, run parameter-using forwards through `ddp_model(...)`,
 > including `mode="embed"` and `mode="loss"`. Calling the underlying module
 > bypasses DDP's hooks and can cause reducer errors when
@@ -367,7 +370,8 @@ loss, tree = output.total, output.tree
 loss.backward()
 ```
 
-> [!NOTE]
+> **Note**
+>
 > The built-in loss method remains under active development and testing.
 
 See [Training](docs/model/training.md),
@@ -509,7 +513,8 @@ Contract DE-AC05-00OR22725.
 
 ## License and Model Terms
 
-> [!IMPORTANT]
+> **Important**
+>
 > AlphaGenome PyTorch is an independent research implementation, not an
 > official Google DeepMind package. It has not been designed or validated for
 > direct clinical use.
