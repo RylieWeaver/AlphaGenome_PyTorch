@@ -119,6 +119,7 @@ def test_config_save_load_roundtrip(tmp_path):
     assert loaded.pair_channels == cfg.pair_channels
     assert loaded.pair_heads == cfg.pair_heads
     assert loaded.sync_bn == cfg.sync_bn
+    assert loaded.dtype_policy == cfg.dtype_policy
     assert loaded.metadata.get_heads() == cfg.metadata.get_heads()
     assert torch.equal(
         loaded.metadata.metadata["heads"]["rna_seq"]["means"],

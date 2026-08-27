@@ -1,3 +1,6 @@
+# Standard library
+import math
+
 # External
 import torch
 import torch.nn as nn
@@ -6,6 +9,7 @@ from einops import repeat
 
 # Internal
 from .layers import BatchNorm, GELU_1702
+from .precision import _ACTIVE_DTYPE_POLICY
 
 
 
@@ -31,21 +35,48 @@ class StandardizedConv1d(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = kernel_size
 
-        # Initialization
-        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size))
+        # Match AlphaGenome Research's hk.initializers.TruncatedNormal calls:
+        # https://github.com/google-deepmind/alphagenome_research/blob/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d/src/alphagenome_research/model/convolutions.py#L54-L98
+        # Haiku defaults to a zero mean and truncates at +/-2 standard
+        # deviations:
+        # https://github.com/google-deepmind/dm-haiku/blob/v0.0.17/haiku/_src/initializers.py#L97-L134
+        self.weight = nn.Parameter(torch.empty(out_channels, in_channels, kernel_size))
         self.scale = nn.Parameter(torch.ones(out_channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(out_channels))
+        self.bias = nn.Parameter(torch.empty(out_channels))
+        fan_in = kernel_size * in_channels
+        weight_std = 1.0 / math.sqrt(fan_in)
+        nn.init.trunc_normal_(
+            self.weight,
+            mean=0.0,
+            std=weight_std,
+            a=-2.0 * weight_std,
+            b=2.0 * weight_std,
+        )
+        bias_std = 1e-4
+        nn.init.trunc_normal_(
+            self.bias,
+            mean=0.0,
+            std=bias_std,
+            a=-2.0 * bias_std,
+            b=2.0 * bias_std,
+        )
 
-    def forward(self, x):                               # x: [B, C_in, S]
+    def forward(self, x):                                       # x: [B, C_in, S]
         # Setup
         fan_in = self.kernel_size * self.in_channels
-        w = self.weight
+        compute_dtype = _ACTIVE_DTYPE_POLICY.get().compute_dtype
+        w = self.weight.to(compute_dtype)
+        scale = self.scale.to(compute_dtype)
 
         # Normalize weights
-        w = w - w.mean(dim=(1, 2), keepdim=True)        # [C_out, C_in, K]
-        var_w = w.var(dim=(1, 2), keepdim=True)         # [C_out, 1, 1]
-        w_scale = self.scale * torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
-        w_standardized = w * w_scale                    # [C_out, C_in, K]
+        w = w - w.mean(dim=(1, 2), keepdim=True)                # [C_out, C_in, K]
+        # JAX uses population variance (correction=0)
+        var_w = w.var(dim=(1, 2), correction=0, keepdim=True)   # [C_out, 1, 1]
+        w_scale = (
+            scale *
+            torch.rsqrt(torch.clamp(fan_in * var_w, min=1e-4))
+        )
+        w_standardized = w * w_scale                            # [C_out, C_in, K]
 
         # Apply conv1d with normalized weights
         out = F.conv1d(

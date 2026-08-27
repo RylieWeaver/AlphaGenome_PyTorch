@@ -31,6 +31,7 @@ from .normalize import (
 )
 from .one_hot_encoder import DNAOneHotEncoder
 from .splicing import generate_splice_site_positions
+from .precision import dtype_policy_context, get_dtype_policy
 
 
 HeadOutput = dict[str, torch.Tensor]
@@ -156,7 +157,7 @@ class TransformerTower(nn.Module):
         pos_channels: int,
         mlp_ratio: int,
         dropout: float,
-        sync_bn: bool = True
+        sync_bn: bool = True,
     ):
         super().__init__()
         # Read and check inputs
@@ -196,7 +197,7 @@ class TransformerTower(nn.Module):
                     pos_channels=self.pos_channels,
                     mlp_ratio=self.mlp_ratio,
                     dropout=self.dropout,
-                    sync_bn=self.sync_bn
+                    sync_bn=self.sync_bn,
                 )
             )
 
@@ -246,6 +247,7 @@ class AlphaGenomeConfig():
         splice_site_channels: int | None = None,
         splice_site_threshold: float = 0.1,
         min_zero_multinomial_loss: bool = True,
+        dtype_policy: str = "deepmind",
         metadata: Metadata | dict | None = None,
         **kwargs  # Catches unexpected args if the config is changed in future versions
     ):
@@ -275,6 +277,7 @@ class AlphaGenomeConfig():
         self.splice_site_channels = splice_site_channels if splice_site_channels is not None else num_channels
         self.splice_site_threshold = splice_site_threshold
         self.min_zero_multinomial_loss = min_zero_multinomial_loss
+        self.dtype_policy = dtype_policy
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -345,6 +348,7 @@ class AlphaGenome(nn.Module):
         self.splice_site_channels = cfg.splice_site_channels
         self.splice_site_threshold = cfg.splice_site_threshold
         self.min_zero_multinomial_loss = cfg.min_zero_multinomial_loss
+        self.dtype_policy = get_dtype_policy(cfg.dtype_policy)  # Instantiate str --> DtypePolicy object
 
         # Read the metadata (make class if in dict form)
         if isinstance(cfg.metadata, dict):
@@ -378,7 +382,7 @@ class AlphaGenome(nn.Module):
             first_conv_width=self.first_conv_width,
             encoder_downsample_width=self.encoder_downsample_width,
             block_width=self.block_width,
-            sync_bn=self.sync_bn
+            sync_bn=self.sync_bn,
         )
         self.org_embedder = nn.Embedding(self.num_organisms, self.channel_sizes[-1])
         self.transformer_tower = TransformerTower(
@@ -395,7 +399,7 @@ class AlphaGenome(nn.Module):
             pos_channels=self.pos_channels,
             mlp_ratio=self.transformer_mlp_ratio,
             dropout=self.dropout,
-            sync_bn=self.sync_bn
+            sync_bn=self.sync_bn,
         )
         self.sequence_decoder = SequenceDecoder(
             channel_sizes=self.channel_sizes,
@@ -432,6 +436,17 @@ class AlphaGenome(nn.Module):
             min_zero_multinomial_loss=self.min_zero_multinomial_loss,
             metadata=self.metadata,
         )
+
+        # Cast model parameters and persistent state with the precision policy.
+        self.to(dtype=self.dtype_policy.parameter_dtype)
+
+    @property
+    def device(self) -> torch.device:
+        # NOTE: This assumes that all model parameters are on the same device,
+        # which should be true for our DDP, FSDP, and Sequence-Parallel
+        # training setups. If the model is split across devices, this will
+        # return the device of the first parameter (dangerous).
+        return next(self.parameters()).device
 
     def save(self, model_dir: Path | str) -> None:
         model_dir = Path(model_dir)
@@ -546,7 +561,7 @@ class AlphaGenome(nn.Module):
         embeddings: Embeddings,                     # Embeddings object containing 1bp, 128bp, and pair embeddings
         splice_site_positions: torch.Tensor,        # [B, 4, K]
         organism_index: torch.Tensor,               # [B]
-        tissue_mask: torch.Tensor | None            # [B, #D, #A, T or 2*T]
+        tissue_mask: torch.Tensor | None = None     # [B, #D, #A, T or 2*T]
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings and splice site positions.
 
@@ -567,7 +582,7 @@ class AlphaGenome(nn.Module):
         """Compute output embeddings for an already normalized batch."""
         if batch.dna_sequence_one_hot is None or batch.organism_index is None:
             raise ValueError("A normalized batch requires DNA and organism data.")
-        x = batch.dna_sequence_one_hot
+        x = batch.dna_sequence_one_hot.to(self.dtype_policy.input_dtype)
         organism_index = batch.organism_index
 
         # Encode sequence with CNN encoder
@@ -655,7 +670,6 @@ class AlphaGenome(nn.Module):
                 embeddings,
                 splice_site_positions,
                 organism_index,
-                tissue_mask=batch.splice_junctions_mask,
             )
 
         return predictions
@@ -727,27 +741,28 @@ class AlphaGenome(nn.Module):
             raise TypeError("Loss mode requires a DataBatch with targets.")
 
         batch = self._prepare_batch(data, organism_index)
-        embeddings = self._embed_batch(batch)
+        with dtype_policy_context(self.dtype_policy, self.device.type):
+            embeddings = self._embed_batch(batch)
 
-        if mode == "embed":
-            return embeddings
+            if mode == "embed":
+                return self.dtype_policy.cast_output(embeddings)
 
-        predictions = self._predict_from_embeddings(embeddings, batch)
-        if mode == "predict":
-            return (
-                (predictions, embeddings)
-                if return_embeddings
-                else predictions
+            predictions = self._predict_from_embeddings(embeddings, batch)
+            if mode == "predict":
+                predictions = self.dtype_policy.cast_output(predictions)
+                if return_embeddings:
+                    return predictions, self.dtype_policy.cast_output(embeddings)
+                return predictions
+            
+            metric_tree = self.metric_tree_from_predictions(predictions, batch)
+            return self.dtype_policy.cast_output(
+                LossOutput(
+                    tree=metric_tree,
+                    total=metric_tree.total_loss(),
+                    predictions=predictions if return_predictions else None,
+                    embeddings=embeddings if return_embeddings else None,
+                )
             )
-
-        # Loss mode
-        metric_tree = self.metric_tree_from_predictions(predictions, batch)
-        return LossOutput(
-            tree=metric_tree,
-            total=metric_tree.total_loss(),
-            predictions=predictions if return_predictions else None,
-            embeddings=embeddings if return_embeddings else None,
-        )
 
     def embed(
         self,

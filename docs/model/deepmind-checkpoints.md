@@ -40,6 +40,7 @@ See [Flexible Loading](#flexible-loading) for the organism and head arguments.
 | --- | --- | --- |
 | `device` | `"cpu"` | Final device receiving the model. |
 | `metadata` | `None` | Supplied value &rarr; `local_dir` &rarr; Hugging Face cache/download. |
+| `dtype_policy` | `"deepmind"` | Runtime precision policy (see [Precision and Dtype Policies](configuration.md#precision-and-dtype-policies) for options and behavior). |
 | `load_state` | `False` | `False`: skip state loading. `True`: resolve state (`local_dir` &rarr; Hugging Face cache/download), then apply flexible loading. |
 | `local_dir` | `None` | `None`: Hugging Face cache/download. Supplied: local directory for metadata and state. In either location, reuse an existing file &rarr; download if missing. |
 | `local_filename` | `None` | Local state filename: supplied value &rarr; `alphagenome_<fold>.pt`. |

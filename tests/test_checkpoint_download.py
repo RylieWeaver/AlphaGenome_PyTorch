@@ -628,10 +628,25 @@ def test_deepmind_config_accepts_custom_metadata(as_metadata_object):
     cfg = deepmind_config(metadata=metadata)
 
     assert cfg.max_seq_len == 1_048_576
+    assert not cfg.min_zero_multinomial_loss
+    assert cfg.dtype_policy == "deepmind"
+    assert cfg.init_scale == 0.1
     assert cfg.metadata.get_num_organisms() == 1
     assert cfg.metadata.get_organisms() == ["human"]
     assert cfg.metadata.get_heads() == [MLM_HEAD_NAME]
     assert cfg.metadata.metadata["heads"][MLM_HEAD_NAME] == {}
+
+
+@pytest.mark.parametrize("dtype_policy", ["deepmind", "float32", "float64"])
+def test_deepmind_config_selects_dtype_policy(dtype_policy):
+    metadata = {
+        "organisms": ["human"],
+        "heads": {MLM_HEAD_NAME: {}},
+    }
+
+    cfg = deepmind_config(metadata=metadata, dtype_policy=dtype_policy)
+
+    assert cfg.dtype_policy == dtype_policy
 
 
 def test_deepmind_metadata_loads_local_converted_metadata(tmp_path):

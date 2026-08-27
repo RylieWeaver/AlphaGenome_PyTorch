@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 # Internal
 from .attention import apply_rope
+from .precision import _ACTIVE_DTYPE_POLICY
 from .metadata import Metadata
 from .schemas import Channels
 from . import bundles
@@ -25,6 +26,8 @@ from . import losses
 
 _SOFT_CLIP_VALUE = 10.0
 _GENOME_TRACK_POSITIONAL_WEIGHT = 5.0
+_SPLICE_JUNCTION_HEAD_LOSS_WEIGHT = 0.2
+_SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT = 0.2
 
 _MetadataMeans = torch.Tensor | Sequence[Sequence[float]]
 _MetadataMask = torch.Tensor | Sequence[Sequence[bool]]
@@ -400,7 +403,7 @@ def _sum_pool(
 ) -> torch.Tensor:
     """Sum pooling over the sequence dimension."""
     B, S, C = x.shape                       # [B, S, C]
-    dtype = torch.float32
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
     x = x.view(B, S // width, width, C)     # [B, S//W, W, C]
     return x.sum(dim=2, dtype=dtype)        # [B, S//W, C]
 
@@ -457,12 +460,25 @@ class MultiOrganismLinear(nn.Module):
         x: torch.Tensor,                    # [B, *, D_in]
         organism_index: torch.Tensor,       # [B]
     ) -> torch.Tensor:
-        w = get_param_for_index(self.weight, organism_index).to(x.dtype)                            # [B, D_in, D_out]
-        b = get_param_for_index(self.bias, organism_index).to(x.dtype)                              # [B, D_out]
-        num_inner_dims = len(x.shape) - 2
+        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        w = get_param_for_index(self.weight, organism_index).to(compute_uptype)
+        b = get_param_for_index(self.bias, organism_index).to(x.dtype)
+        num_inner_dims = x.ndim - 2
         target_b_shape = (b.shape[0],) + (1,) * num_inner_dims + (b.shape[1],)
-        x = torch.einsum('b...i, bij -> b...j', x, w.to(x.dtype)) + b.reshape(target_b_shape)       # [B, *, D_out]
-        return x
+
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Keeping the weight in
+        # its FP32 parameter dtype skips JAX's BF16 operand rounding and may
+        # change results. The bias is not part of the contraction, so it is first
+        # rounded to the compute dtype to preserve JAX's bias rounding.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = torch.einsum(
+                "b...i,bij->b...j",
+                x.to(compute_uptype),
+                w,
+            )
+        return x + b.to(compute_uptype).reshape(target_b_shape)
 
 
 def predictions_scaling(
@@ -617,7 +633,7 @@ class GenomeTracksHead(Head):
             _track_means = torch.as_tensor(track_means)
         self.register_buffer(
             "_track_means",
-            _track_means.to(torch.float32),
+            _track_means.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             persistent=False,
         )                                                                   # [O, T]
         self._register_metadata_mask("_track_mask", track_mask)             # [O, T]
@@ -680,7 +696,9 @@ class GenomeTracksHead(Head):
         x = embeddings.get_sequence_embeddings(resolution)              # [B, S, C]
         x = self.multiorg_linear[str(resolution)](x, organism_index)    # [B, S, T]
         residual_scale = get_param_for_index(self.residual_scales[str(resolution)], organism_index)
-        return F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        return (
+            F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
     
     def forward(
         self,
@@ -900,7 +918,10 @@ class SpliceSitesClassificationHead(Head):
         """Predicts splice site classification from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)
         logits = self._forward_logits(embeddings_1bp, organism_index)
-        probs = F.softmax(logits.to(torch.float32), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(
@@ -929,7 +950,7 @@ class SpliceSitesClassificationHead(Head):
         loss = losses.cross_entropy_loss_from_logits(
             y_pred_logits=logits,
             # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
-            y_true=(1.0 - 1e-7) * splice_sites.to(torch.float32)
+            y_true=(1.0 - 1e-7) * splice_sites.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
             + 1e-7 / self._num_tracks,
             mask=classification_mask,
             axis=-1,
@@ -981,7 +1002,9 @@ class SpliceSitesUsageHead(Head):
         """Predicts splice site usage from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)              # [B, S, C]
         logits = self._forward_logits(embeddings_1bp, organism_index)       # [B, S, T]
-        splice_site_usage = torch.sigmoid(logits.to(torch.float32)).to(torch.float16)
+        splice_site_usage = torch.sigmoid(
+            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
         return {'logits': logits, 'predictions': splice_site_usage}
 
     def loss(
@@ -1005,7 +1028,7 @@ class SpliceSitesUsageHead(Head):
         )
         loss = losses.binary_crossentropy_from_logits(
             y_pred=logits,
-            y_true=torch.clamp(splice_site_usage.to(torch.float32), 1e-7, 1.0 - 1e-7),
+            y_true=torch.clamp(splice_site_usage.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), 1e-7, 1.0 - 1e-7),
             mask=mask,
         )
         return {
@@ -1047,10 +1070,28 @@ class SpliceSitesJunctionHead(Head):
             num_organisms=num_organisms,
         )
         shape = (self._num_organisms, 2, self._num_tissues, self._splice_site_channels)
-        self.pos_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.pos_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
+
+        # Match AlphaGenome Research's hk.initializers.TruncatedNormal(0.1):
+        # https://github.com/google-deepmind/alphagenome_research/blob/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d/src/alphagenome_research/model/heads.py#L1126-L1135
+        # Haiku defaults to a zero mean and truncates at +/-2 standard
+        # deviations, or [-0.2, 0.2] here:
+        # https://github.com/google-deepmind/dm-haiku/blob/v0.0.17/haiku/_src/initializers.py#L97-L134
+        def _truncated_normal_parameter() -> nn.Parameter:
+            parameter = nn.Parameter(torch.empty(shape))
+            rope_std = 0.1
+            nn.init.trunc_normal_(
+                parameter,
+                mean=0.0,
+                std=rope_std,
+                a=-2.0 * rope_std,
+                b=2.0 * rope_std,
+            )
+            return parameter
+
+        self.pos_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.pos_donor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_donor_logits_embeddings = _truncated_normal_parameter()
 
     def _get_track_mask(self, tissue_mask: torch.Tensor) -> torch.Tensor:       # [*, T]
         return torch.cat([tissue_mask, tissue_mask], dim=-1).to(torch.bool)     # [*, 2*T]
@@ -1110,7 +1151,8 @@ class SpliceSitesJunctionHead(Head):
             return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
         def _apply_rope(x, indices, name: str):                                 # x: [B, S, C_splice] | indices: [B, P]
-            x = _index_embedding(x, indices).to(torch.float32)                  # [B, P, C_splice]
+            compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+            x = _index_embedding(x, indices).to(compute_uptype)                 # [B, P, C_splice]
             params = get_param_for_index(
                 getattr(self, f"{name}_embeddings"), organism_index
             )                                                                   # [B, 2, T, C_splice]
@@ -1120,7 +1162,7 @@ class SpliceSitesJunctionHead(Head):
             x = apply_rope(
                 x, indices, max_position=self._max_position_encoding_distance   # [B, P, T, C_splice]
             )
-            return x
+            return x.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
         
         splice_site_logits = self.multiorg_linear(x, organism_index)            # [B, S, C_splice]
 
@@ -1129,41 +1171,52 @@ class SpliceSitesJunctionHead(Head):
         neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
         neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
 
-        pos_counts = F.softplus(
-            torch.einsum(
-                'bdtc, batc -> bdat',
-                pos_donor_logits,
-                pos_accept_logits,
-            )
-        )   # [B, D, T, C_splice] x [B, A, T, C_splice] -> [B, D, A, T]
-        neg_counts = F.softplus(
-            torch.einsum(
-                'bdtc, batc -> bdat',
-                neg_donor_logits,
-                neg_accept_logits,
-            )
-        )   # [B, D, T, C_splice] x [B, A, T, C_splice] -> [B, D, A, T]
+        policy = _ACTIVE_DTYPE_POLICY.get()
 
-        # NOTE: The einsum for these masks is equivalent to an "and" operation
-        pos_mask = torch.einsum(
-            'bd,ba->bda', pos_donor_idx >= 0, pos_accept_idx >= 0
-        ).to(torch.float32)                                                     # [B, D, A]
-        neg_mask = torch.einsum(
-            'bd,ba->bda', neg_donor_idx >= 0, neg_accept_idx >= 0
-        ).to(torch.float32)                                                     # [B, D, A]
+        # Output calculation (back to the compute dtype)
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Here, the donor and
+        # acceptor logits are already FP32 because they are produced by the FP32
+        # RoPE calculation. Upcasting them therefore skips the BF16 operand
+        # rounding performed by JAX and may change results.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            pos_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    pos_donor_logits.to(policy.compute_uptype),
+                    pos_accept_logits.to(policy.compute_uptype),
+                )
+            )
+            neg_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    neg_donor_logits.to(policy.compute_uptype),
+                    neg_accept_logits.to(policy.compute_uptype),
+                )
+            )
+        pos_counts = pos_counts.to(policy.compute_dtype)
+        neg_counts = neg_counts.to(policy.compute_dtype)
+
+        pos_mask = (pos_donor_idx >= 0)[:, :, None] & (
+            pos_accept_idx >= 0
+        )[:, None, :]                                                           # [B, D, A]
+        neg_mask = (neg_donor_idx >= 0)[:, :, None] & (
+            neg_accept_idx >= 0
+        )[:, None, :]                                                           # [B, D, A]
         pos_mask = (
             pos_mask[:, :, :, None]
-            * track_mask[:, :, :, :self._num_tissues]
+            & track_mask[:, :, :, :self._num_tissues].bool()
         )                                                                       # [B, D, A, T]
         neg_mask = (
             neg_mask[:, :, :, None]
-            * track_mask[:, :, :, self._num_tissues:]
+            & track_mask[:, :, :, self._num_tissues:].bool()
         )                                                                       # [B, D, A, T]
         
-        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)     # [B, D, A, 2*T]
+        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)         # [B, D, A, 2*T]
         pred_counts = torch.cat([pos_counts, neg_counts], dim=-1)               # [B, D, A, 2*T]
         pred_counts = torch.where(
-            splice_junctions_mask.bool(), pred_counts, 0
+            splice_junctions_mask, pred_counts, 0
         )
         return pred_counts, splice_junctions_mask
     
@@ -1180,12 +1233,12 @@ class SpliceSitesJunctionHead(Head):
                 'splice_site_positions is required for junctions predictions.'
             )
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
-        splice_junctions, splice_junction_mask = self._forward(     # both [B, D, A, 2*T]
+        splice_junctions, splice_junction_mask = self._forward(         # both [B, D, A, 2*T]
            embeddings_1bp, splice_site_positions, 
            organism_index, tissue_mask
         )
         return {
-           'predictions': splice_junctions,                         # [B, D, A, 2*T]
+           'predictions': splice_junctions,                             # [B, D, A, 2*T]
            'splice_site_positions': splice_site_positions,              # [B, 4, P]
            'splice_junction_mask': splice_junction_mask                 # [B, D, A, 2*T]
         }
@@ -1219,16 +1272,16 @@ class SpliceSitesJunctionHead(Head):
         pairs_mask = pairs_mask.to(torch.bool)
         accept_total_loss = losses.poisson_loss(
             y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=torch.float32)
+               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
             ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=torch.float32),
+            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             mask=(pairs_mask.any(dim=-2)),
         )
         donor_total_loss = losses.poisson_loss(
             y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=torch.float32)
+               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
             ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=torch.float32),
+            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             mask=(pairs_mask.any(dim=-3)),
         )
 
@@ -1247,12 +1300,24 @@ class SpliceSitesJunctionHead(Head):
         )
         return {
             'ratios': {
-                'acceptor': losses.LossLeaf(acceptor_ratios_loss),
-                'donor': losses.LossLeaf(donor_ratios_loss),
+                'acceptor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * acceptor_ratios_loss
+                ),
+                'donor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * donor_ratios_loss
+                ),
             },
             'total_counts': {
-                'acceptor': losses.LossLeaf(0.2 * accept_total_loss),
-                'donor': losses.LossLeaf(0.2 * donor_total_loss),
+                'acceptor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
+                    * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
+                    * accept_total_loss
+                ),
+                'donor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
+                    * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
+                    * donor_total_loss
+                ),
             },
         }
 
@@ -1296,7 +1361,10 @@ class MaskedLanguageModelingHead(Head):
         """Predicts masked language modeling from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
         logits = self.linear(embeddings_1bp)                            # [B, S, 5]
-        probs = F.softmax(logits.to(torch.float32), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(
@@ -1312,7 +1380,11 @@ class MaskedLanguageModelingHead(Head):
         assert labels.shape == logits.shape[:-1], \
             'Predictions shape does not match targets shape.'
         
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), reduction='mean')
+        loss = F.cross_entropy(
+            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype).view(-1, logits.size(-1)),
+            labels.view(-1),
+            reduction='mean',
+        )
         return {
             'cross_entropy': losses.LossLeaf(loss),
         }

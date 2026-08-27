@@ -134,6 +134,7 @@ def test_genome_track_loss_tree_combines_loss_components(
         # that to be configurable in the future.
         + 5.0 * components[positional_key]
     )
+    expected = model.dtype_policy.cast_output(expected)
     torch.testing.assert_close(
         result.tree.total_loss(head_name),
         expected,
