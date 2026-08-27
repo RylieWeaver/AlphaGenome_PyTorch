@@ -11,6 +11,7 @@ from .bundles import BundleName
 from .heads import HeadName
 from .metadata import Metadata
 from .model import AlphaGenome, AlphaGenomeConfig
+from .one_hot_encoder import DNAOneHotEncoder
 from .schemas import DataBatch
 
 
@@ -35,6 +36,7 @@ TISSUE_HEADS = {
 }
 DEFAULT_SYNTHETIC_NUM_TRACKS = 4
 SPLICE_SITES_CLASSIFICATION_NUM_CLASSES = 5
+SYNTHETIC_DNA_ALPHABET = "ACGTN"
 
 
 ### METADATA ###
@@ -94,29 +96,31 @@ def _synthetic_head(
                 f"using {SPLICE_SITES_CLASSIFICATION_NUM_CLASSES} classes.",
                 stacklevel=2,
             )
-        num_tracks = [SPLICE_SITES_CLASSIFICATION_NUM_CLASSES] * num_organisms
+        num_tracks_by_organism = [
+            SPLICE_SITES_CLASSIFICATION_NUM_CLASSES
+        ] * num_organisms
         return {
-            "num_tracks": num_tracks,
-            "track_mask": synthetic_metadata_track_mask(num_tracks),
+            "num_tracks": num_tracks_by_organism,
+            "track_mask": synthetic_metadata_track_mask(num_tracks_by_organism),
         }
 
-    num_tracks = _synthetic_num_tracks(
+    num_tracks_by_organism = _synthetic_num_tracks(
         num_organisms,
         num_tracks=num_tracks,
     )
     if head_name in GENOME_TRACK_HEADS:
         return {
-            "num_tracks": num_tracks,
-            "means": _synthetic_means(num_tracks),
-            "track_mask": synthetic_metadata_track_mask(num_tracks),
+            "num_tracks": num_tracks_by_organism,
+            "means": _synthetic_means(num_tracks_by_organism),
+            "track_mask": synthetic_metadata_track_mask(num_tracks_by_organism),
         }
     if head_name in TRACK_HEADS:
         return {
-            "num_tracks": num_tracks,
-            "track_mask": synthetic_metadata_track_mask(num_tracks),
+            "num_tracks": num_tracks_by_organism,
+            "track_mask": synthetic_metadata_track_mask(num_tracks_by_organism),
         }
     if head_name in TISSUE_HEADS:
-        return {"num_tissues": num_tracks}
+        return {"num_tissues": num_tracks_by_organism}
 
     raise ValueError(f"Unsupported head {head_name!r}.")
 
@@ -189,16 +193,35 @@ def synthetic_organism_index(batch_size: int, num_organisms: int = 2) -> torch.T
     return torch.tensor([i % num_organisms for i in range(batch_size)], dtype=torch.long)       # [B]
 
 
-def synthetic_dna_sequence(batch_size: int, seq_len: int) -> torch.Tensor:
-    bases = torch.randint(0, 4, (batch_size, seq_len), dtype=torch.long)
-    return F.one_hot(bases, num_classes=4).to(torch.float32)                                    # [B, S, 4]
+def synthetic_dna_sequence(batch_size: int, seq_len: int) -> list[str]:
+    base_indices = torch.randint(
+        0,
+        len(SYNTHETIC_DNA_ALPHABET),
+        (batch_size, seq_len),
+    )
+    return [
+        "".join(SYNTHETIC_DNA_ALPHABET[index] for index in sequence)
+        for sequence in base_indices.tolist()
+    ]
+
+
+def synthetic_dna_sequence_one_hot(
+    batch_size: int,
+    seq_len: int,
+) -> torch.Tensor:
+    sequences = synthetic_dna_sequence(batch_size, seq_len)
+    return DNAOneHotEncoder().encode(sequences)                                                 # [B, S, 4]
 
 
 def synthetic_mlm(batch_size: int, seq_len: int, vocab_size: int = 5) -> torch.Tensor:
     return torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)                # [B, S]
 
 
-def synthetic_poisson_tracks(means: torch.Tensor, organism_index: torch.Tensor, length: int) -> torch.Tensor:
+def synthetic_poisson_tracks(
+    means: torch.Tensor | Sequence[Sequence[float]],
+    organism_index: torch.Tensor,
+    length: int,
+) -> torch.Tensor:
     means = torch.as_tensor(means, dtype=torch.float32)
     rates = means[organism_index].unsqueeze(1).repeat(1, length, 1)                             # [B, S, T]
     return torch.poisson(rates).to(torch.float32)                                               # [B, S, T]
@@ -301,7 +324,10 @@ def synthetic_batch(
         num_organisms=metadata.get_num_organisms(),
     )
     batch_kwargs = {
-        "dna_sequence": synthetic_dna_sequence(batch_size, seq_len),
+        "dna_sequence_one_hot": synthetic_dna_sequence_one_hot(
+            batch_size,
+            seq_len,
+        ),
         "organism_index": organism_index,
     }
 

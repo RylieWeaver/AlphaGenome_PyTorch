@@ -1,5 +1,12 @@
 __pycache__/
+.venv/
 *.pt
 *.pth
+*.fa
+*.fai
+*.bw
+*.bigwig
 .vscode/
 launch.json
+docs/_build/
+scratch/

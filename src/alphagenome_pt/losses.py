@@ -1,13 +1,247 @@
 # Provenance: PyTorch port of AlphaGenome (Google LLC) code (Apache-2.0). Modified by Rylie Weaver, 2026.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Imports"""
 # External
-
+from collections.abc import Iterator, Mapping
+from typing import TypeAlias
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
 
+# Internal
+from .precision import _ACTIVE_DTYPE_POLICY
+
+
+
+class LossLeaf:
+    """
+    Later we'll add numerator and denominator to this leaf so that we can
+    calculate a true global mean across distributed processes. For now, it's
+    a simple wrapper around a scalar tensor.
+    """
+    def __init__(self, value: torch.Tensor | float):
+        if isinstance(value, float):
+            value = torch.tensor(value)
+        if not isinstance(value, torch.Tensor):
+            raise TypeError("LossLeaf value must be a torch.Tensor or float.")
+        if not value.is_floating_point():
+            raise TypeError("LossLeaf value must be floating point.")
+        if value.ndim != 0:
+            raise ValueError("LossLeaf value must be a scalar tensor.")
+        self._value = value
+
+    @property
+    def value(self) -> torch.Tensor:
+        return self._value
+
+    def add(
+        self,
+        other: "LossLeaf",
+        *,
+        detach: bool = True,
+    ) -> "LossLeaf":
+        """Return a leaf containing the sum of two leaf values."""
+        if not isinstance(other, LossLeaf):
+            raise TypeError("LossLeaf can only be added to another LossLeaf.")
+        left = self.value.detach() if detach else self.value
+        right = other.value.detach() if detach else other.value
+        return LossLeaf(left + right)
+
+    def detach(self) -> "LossLeaf":
+        return LossLeaf(self.value.detach())
+
+
+MetricPath: TypeAlias = tuple[str, ...]
+MetricNode: TypeAlias = LossLeaf | Mapping[str, "MetricNode"]
+MetricDict: TypeAlias = dict[str, "MetricDictNode"]
+MetricDictNode: TypeAlias = torch.Tensor | MetricDict
+
+
+class MetricTree:
+    """
+    A nested tree of model metrics, currently limited to loss leaves.
+
+    Traversals generate tuple paths in sorted order whenever they are needed.
+    It's crucial to have a canonical order for distributed reductions, so that
+    every rank all-reduces the same sequence of leaves. However, it adds the
+    assumption that each tree has the same set of paths. As a result, when no
+    targets contribute to a leaf, its value should be a scalar zero tensor
+    rather than omitting the leaf.
+    """
+
+    def __init__(self, children: Mapping[str, MetricNode]):
+        if not isinstance(children, Mapping):
+            raise TypeError("MetricTree children must be a mapping.")
+        if not children:
+            raise ValueError("MetricTree cannot be empty.")
+        self.children = dict(children)
+
+    @staticmethod
+    def _sorted_names(children: Mapping[str, MetricNode]) -> tuple[str, ...]:
+        names = tuple(children)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("Metric path names must be non-empty strings.")
+        return tuple(sorted(names))
+
+    @staticmethod
+    def _walk(
+        children: Mapping[str, MetricNode],
+        prefix: MetricPath = (),
+    ) -> Iterator[tuple[MetricPath, LossLeaf]]:
+        for name in MetricTree._sorted_names(children):
+            node = children[name]
+
+            path = (*prefix, name)
+            if isinstance(node, LossLeaf):
+                yield path, node
+            elif isinstance(node, Mapping):
+                if not node:
+                    raise ValueError(f"Metric branch {name!r} cannot be empty.")
+                yield from MetricTree._walk(node, path)
+            else:
+                raise TypeError(
+                    "MetricTree nodes must be LossLeaf objects or mappings."
+                )
+
+    def iter_leaves(self) -> Iterator[tuple[MetricPath, LossLeaf]]:
+        """
+        Yield (path, leaf) pairs in a canonical sorted order,
+        which will be necessary for consistent traversal order
+        when doing distributed reductions.
+        """
+        yield from self._walk(self.children)
+
+    def leaf_paths(self) -> tuple[MetricPath, ...]:
+        """Return all leaf paths in canonical sorted order."""
+        return tuple(path for path, _ in self.iter_leaves())
+
+    @classmethod
+    def _to_dict_children(
+        cls,
+        children: Mapping[str, MetricNode],
+    ) -> MetricDict:
+        values: MetricDict = {}
+        for name in cls._sorted_names(children):
+            node = children[name]
+            if isinstance(node, LossLeaf):
+                values[name] = node.value
+            elif isinstance(node, Mapping):
+                if not node:
+                    raise ValueError(f"Metric branch {name!r} cannot be empty.")
+                values[name] = cls._to_dict_children(node)
+            else:
+                raise TypeError(
+                    "MetricTree nodes must be LossLeaf objects or mappings."
+                )
+        return values
+
+    def to_dict(self) -> MetricDict:
+        """Return a nested dictionary of leaf tensors in sorted order."""
+        return self._to_dict_children(self.children)
+
+    @classmethod
+    def _detach_children(
+        cls,
+        children: Mapping[str, MetricNode],
+    ) -> dict[str, MetricNode]:
+        detached: dict[str, MetricNode] = {}
+        for name in cls._sorted_names(children):
+            node = children[name]
+            if isinstance(node, LossLeaf):
+                detached[name] = node.detach()
+            elif isinstance(node, Mapping):
+                detached[name] = cls._detach_children(node)
+            else:
+                raise TypeError(
+                    "MetricTree nodes must be LossLeaf objects or mappings."
+                )
+        return detached
+
+    @classmethod
+    def _add_children(
+        cls,
+        left: Mapping[str, MetricNode],
+        right: Mapping[str, MetricNode],
+        *,
+        detach: bool,
+        prefix: MetricPath = (),
+    ) -> dict[str, MetricNode]:
+        if left.keys() != right.keys():
+            raise ValueError(
+                "Metric trees must have identical paths; branches differ "
+                f"at {prefix!r}."
+            )
+
+        children: dict[str, MetricNode] = {}
+        for name in cls._sorted_names(left):
+            left_node = left[name]
+            right_node = right[name]
+            path = (*prefix, name)
+            if isinstance(left_node, LossLeaf) and isinstance(
+                right_node, LossLeaf
+            ):
+                children[name] = left_node.add(right_node, detach=detach)
+            elif isinstance(left_node, Mapping) and isinstance(
+                right_node, Mapping
+            ):
+                children[name] = cls._add_children(
+                    left_node,
+                    right_node,
+                    detach=detach,
+                    prefix=path,
+                )
+            else:
+                raise ValueError(
+                    f"Metric tree shape conflict at {path!r}: one side is "
+                    "a leaf and the other is a branch."
+                )
+        return children
+
+    def detach(self) -> "MetricTree":
+        return MetricTree(self._detach_children(self.children))
+
+    def add(
+        self,
+        other: "MetricTree",
+        *,
+        detach: bool = True,
+    ) -> "MetricTree":
+        if not isinstance(other, MetricTree):
+            raise TypeError("MetricTree can only be added to another MetricTree.")
+
+        return MetricTree(
+            self._add_children(
+                self.children,
+                other.children,
+                detach=detach,
+            )
+        )
+
+    def total_loss(self, *prefix: str) -> torch.Tensor:
+        """Return the summed loss, possibly within prefix."""
+        node: MetricNode = self.children
+        for name in prefix:
+            if not isinstance(node, Mapping):
+                raise KeyError(
+                    f"Metric path continues beyond a leaf: {prefix!r}."
+                )
+            if name not in node:
+                raise KeyError(f"No metrics at path: {prefix!r}.")
+            node = node[name]
+
+        if isinstance(node, LossLeaf):
+            return node.value
+        values = [leaf.value for _, leaf in self._walk(node, prefix)]
+        if not values:
+            raise ValueError(f"Metric branch at {prefix!r} is empty.")
+        return sum(values)
+
+    def head_loss_totals(self) -> dict[str, torch.Tensor]:
+        """Return the loss total for every top-level branch."""
+        return {
+            head_name: self.total_loss(head_name)
+            for head_name in self._sorted_names(self.children)
+        }
 
 
 def _safe_masked_mean(
@@ -23,7 +257,7 @@ def _safe_masked_mean(
         mask = mask.to(x.dtype)
         masked = x * mask
 
-    return torch.sum(masked, dtype=torch.float32) / torch.clamp(torch.sum(mask, dtype=torch.float32), min=1.0)
+    return torch.sum(masked, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype) / torch.clamp(torch.sum(mask, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype), min=1.0)
 
 
 def poisson_loss(
@@ -33,8 +267,8 @@ def poisson_loss(
     mask: torch.Tensor | None = None,       # [#*]
 ) -> torch.Tensor:
     """Poisson loss with fixed dtype and shift to have min_loss = 0."""
-    y_true = torch.abs(y_true).to(torch.float32)
-    y_pred = y_pred.to(torch.float32)
+    y_true = torch.abs(y_true).to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
     y_pred_logits = torch.log(y_pred + 1e-7)
     # Substract the minimum value such that loss is zero at optimal prediction.
     min_value = y_true - y_true * torch.log(y_true + 1e-7)
@@ -62,7 +296,7 @@ def multinomial_loss(
     # Setup
     *extra_dims, S, C = y_pred.shape
     S_sub = multinomial_resolution
-    dtype = torch.float32
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
     y_true = y_true.to(dtype)
     y_pred = y_pred.to(dtype)
     mask = mask.to(dtype)
@@ -128,9 +362,9 @@ def cross_entropy_loss_from_logits(
 ) -> torch.Tensor:
     """Cross-entropy loss from logits."""
     log_softmax_preds = F.log_softmax(
-        y_pred_logits.to(torch.float32), dim=axis
+        y_pred_logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), dim=axis
     )
-    loss = -torch.sum(y_true.to(torch.float32) * log_softmax_preds, dim=axis)
+    loss = -torch.sum(y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) * log_softmax_preds, dim=axis)
     if mask is not None:
         mask = torch.any(mask, dim=axis)
     return _safe_masked_mean(loss, mask)
@@ -165,10 +399,11 @@ def cross_entropy_loss(
     else:
         mask = mask.expand_as(y_true).to(torch.bool)
 
-    y_true = torch.where(mask, y_true.to(torch.float32), torch.zeros_like(y_true, dtype=torch.float32))
-    p_true = y_true / torch.clamp(torch.sum(y_true, dim=axis, keepdim=True), min=eps)
-
-    log_normalizer = torch.log((torch.where(mask, y_pred.to(torch.float32), torch.zeros_like(y_pred, dtype=torch.float32)) + eps).sum(dim=axis))
-    log_likelihood = torch.sum(p_true * torch.log(y_pred + eps), dim=axis)
-    log_loss = log_normalizer - log_likelihood
-    return _safe_masked_mean(log_loss, mask.any(dim=axis))
+    y_true = y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
+    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
+    axis_mask = mask.any(dim=axis, keepdim=True)
+    mask = torch.where(axis_mask, mask, True)
+    p_true = y_true / y_true.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    p_pred = y_pred / y_pred.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    log_loss = (-p_true * torch.log(p_pred)).masked_fill(~mask, 0).sum(dim=axis)
+    return _safe_masked_mean(log_loss, axis_mask.squeeze(dim=axis))

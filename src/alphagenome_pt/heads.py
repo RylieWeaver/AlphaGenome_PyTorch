@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 # Internal
 from .attention import apply_rope
+from .precision import _ACTIVE_DTYPE_POLICY
 from .metadata import Metadata
 from .schemas import Channels
 from . import bundles
@@ -24,6 +25,12 @@ from . import losses
 
 
 _SOFT_CLIP_VALUE = 10.0
+_GENOME_TRACK_POSITIONAL_WEIGHT = 5.0
+_SPLICE_JUNCTION_HEAD_LOSS_WEIGHT = 0.2
+_SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT = 0.2
+
+_MetadataMeans = torch.Tensor | Sequence[Sequence[float]]
+_MetadataMask = torch.Tensor | Sequence[Sequence[bool]]
 
 
 class HeadType(enum.Enum):
@@ -65,30 +72,30 @@ class HeadConfig:
 class GenomeTracksHeadConfig(HeadConfig):
     max_seq_len: int
     num_tracks: int
-    track_means: torch.Tensor   # [O, T]
-    track_mask: torch.Tensor    # [O, T]
+    track_means: _MetadataMeans   # [O, T]
+    track_mask: _MetadataMask     # [O, T]
     resolutions: Sequence[int]
     apply_squashing: bool
-    bundle: str
+    bundle: bundles.BundleName
     min_zero_multinomial_loss: bool = True
 
 
 @dataclasses.dataclass
 class ContactMapsHeadConfig(HeadConfig):
     num_tracks: int
-    track_mask: torch.Tensor
+    track_mask: _MetadataMask
 
 
 @dataclasses.dataclass
 class SpliceSitesClassificationHeadConfig(HeadConfig):
     num_tracks: int
-    track_mask: torch.Tensor
+    track_mask: _MetadataMask
 
 
 @dataclasses.dataclass
 class SpliceSitesUsageHeadConfig(HeadConfig):
     num_tracks: int
-    track_mask: torch.Tensor
+    track_mask: _MetadataMask
 
 
 @dataclasses.dataclass
@@ -96,7 +103,7 @@ class SpliceSitesJunctionHeadConfig(HeadConfig):
     max_seq_len: int
     splice_site_channels: int
     num_tissues: int
-    tissue_mask: torch.Tensor
+    tissue_mask: _MetadataMask
 
 
 @dataclasses.dataclass
@@ -147,6 +154,7 @@ def create_head(
                 min_zero_multinomial_loss=config.min_zero_multinomial_loss,
             )
         case HeadType.CONTACT_MAPS:
+            assert isinstance(config, ContactMapsHeadConfig)
             return ContactMapsHead(
                 name=config.name,
                 num_organisms=config.num_organisms,
@@ -155,6 +163,7 @@ def create_head(
                 track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_CLASSIFICATION:
+            assert isinstance(config, SpliceSitesClassificationHeadConfig)
             return SpliceSitesClassificationHead(
                 name=config.name,
                 num_organisms=config.num_organisms,
@@ -163,6 +172,7 @@ def create_head(
                 track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_USAGE:
+            assert isinstance(config, SpliceSitesUsageHeadConfig)
             return SpliceSitesUsageHead(
                 name=config.name,
                 num_organisms=config.num_organisms,
@@ -171,6 +181,7 @@ def create_head(
                 track_mask=config.track_mask,
             )
         case HeadType.SPLICE_SITES_JUNCTION:
+            assert isinstance(config, SpliceSitesJunctionHeadConfig)
             return SpliceSitesJunctionHead(
                 name=config.name,
                 num_organisms=config.num_organisms,
@@ -181,6 +192,7 @@ def create_head(
                 tissue_mask=config.tissue_mask,
             )
         case HeadType.MASKED_LANGUAGE_MODELING:
+            assert isinstance(config, MaskedLanguageModelingHeadConfig)
             return MaskedLanguageModelingHead(
                 name=config.name,
                 num_organisms=config.num_organisms,
@@ -391,7 +403,7 @@ def _sum_pool(
 ) -> torch.Tensor:
     """Sum pooling over the sequence dimension."""
     B, S, C = x.shape                       # [B, S, C]
-    dtype = torch.float32
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
     x = x.view(B, S // width, width, C)     # [B, S//W, W, C]
     return x.sum(dim=2, dtype=dtype)        # [B, S//W, C]
 
@@ -448,12 +460,25 @@ class MultiOrganismLinear(nn.Module):
         x: torch.Tensor,                    # [B, *, D_in]
         organism_index: torch.Tensor,       # [B]
     ) -> torch.Tensor:
-        w = get_param_for_index(self.weight, organism_index).to(x.dtype)                            # [B, D_in, D_out]
-        b = get_param_for_index(self.bias, organism_index).to(x.dtype)                              # [B, D_out]
-        num_inner_dims = len(x.shape) - 2
+        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        w = get_param_for_index(self.weight, organism_index).to(compute_uptype)
+        b = get_param_for_index(self.bias, organism_index).to(x.dtype)
+        num_inner_dims = x.ndim - 2
         target_b_shape = (b.shape[0],) + (1,) * num_inner_dims + (b.shape[1],)
-        x = torch.einsum('b...i, bij -> b...j', x, w.to(x.dtype)) + b.reshape(target_b_shape)       # [B, *, D_out]
-        return x
+
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Keeping the weight in
+        # its FP32 parameter dtype skips JAX's BF16 operand rounding and may
+        # change results. The bias is not part of the contraction, so it is first
+        # rounded to the compute dtype to preserve JAX's bias rounding.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = torch.einsum(
+                "b...i,bij->b...j",
+                x.to(compute_uptype),
+                w,
+            )
+        return x + b.to(compute_uptype).reshape(target_b_shape)
 
 
 def predictions_scaling(
@@ -524,21 +549,21 @@ class Head(nn.Module, metaclass=abc.ABCMeta):
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B]
         **kwargs,
-    ):
+    ) -> dict[str, torch.Tensor]:
         """Returns the predictions for the head."""
 
     @abc.abstractmethod
     def loss(
         self,
         predictions: dict[str, torch.Tensor],
-        batch: dict[str, torch.Tensor],
-    ):
+        batch: schemas.DataBatch,
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
 
     def _register_metadata_mask(
         self,
         name: str,
-        mask: torch.Tensor,
+        mask: _MetadataMask,
     ) -> None:
         self.register_buffer(
             name,
@@ -588,8 +613,8 @@ class GenomeTracksHead(Head):
         channels: Channels,
         max_seq_len: int,
         num_tracks: int,
-        track_means: torch.Tensor,          # [O, T]
-        track_mask: torch.Tensor,           # [O, T]
+        track_means: _MetadataMeans,        # [O, T]
+        track_mask: _MetadataMask,          # [O, T]
         resolutions: Sequence[int],
         apply_squashing: bool,
         bundle: bundles.BundleName | None = None,
@@ -608,7 +633,7 @@ class GenomeTracksHead(Head):
             _track_means = torch.as_tensor(track_means)
         self.register_buffer(
             "_track_means",
-            _track_means.to(torch.float32),
+            _track_means.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             persistent=False,
         )                                                                   # [O, T]
         self._register_metadata_mask("_track_mask", track_mask)             # [O, T]
@@ -671,14 +696,16 @@ class GenomeTracksHead(Head):
         x = embeddings.get_sequence_embeddings(resolution)              # [B, S, C]
         x = self.multiorg_linear[str(resolution)](x, organism_index)    # [B, S, T]
         residual_scale = get_param_for_index(self.residual_scales[str(resolution)], organism_index)
-        return F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        return (
+            F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
     
     def forward(
         self,
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B] 
         **kwargs
-    ):
+    ) -> dict[str, torch.Tensor]:
         predictions = {}
         for resolution in self._resolutions:
             scaled_predictions = self._forward(
@@ -696,7 +723,7 @@ class GenomeTracksHead(Head):
         organism_index: torch.Tensor,       # [B]
         predictions: torch.Tensor,          # [B, S, C]
         targets: torch.Tensor,              # [B, S, C]
-        targets_mask: torch.Tensor | None,  # [B, #S, C] | None
+        targets_mask: torch.Tensor,         # [B, #S, C]
         resolution: int,
     ) -> dict[str, torch.Tensor]:
         """Computes the loss for the head at a given resolution."""
@@ -707,7 +734,7 @@ class GenomeTracksHead(Head):
             y_pred=predictions,
             y_true=scaled_targets,
             mask=targets_mask,
-            positional_weight=5.0,
+            positional_weight=_GENOME_TRACK_POSITIONAL_WEIGHT,
             multinomial_resolution=predictions.shape[-2],
             min_zero=self._min_zero_multinomial_loss,
         )
@@ -717,7 +744,7 @@ class GenomeTracksHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if self._bundle is None:
             raise ValueError('Bundle is required for loss computation.')
@@ -736,7 +763,7 @@ class GenomeTracksHead(Head):
             )
         
         bundle_resolution = self._bundle.get_resolution()
-        loss_sum, scalars = 0.0, {}
+        resolution_losses: dict[str, losses.MetricNode] = {}
         
         for resolution in self._resolutions:
             predictions_for_resolution = predictions[
@@ -754,12 +781,19 @@ class GenomeTracksHead(Head):
                 targets_mask=mask,
                 resolution=resolution,
             )
-            for k, v in all_losses.items():
-                scalars[f'{k}_{resolution}bp'] = v
-            loss_sum += all_losses['loss']
-        
-        scalars['loss'] = loss_sum
-        return scalars
+            positional_loss = all_losses[
+                'zero_loss_positional'
+                if self._min_zero_multinomial_loss
+                else 'loss_positional'
+            ]
+            resolution_losses[f'{resolution}bp'] = {
+                'total_count': losses.LossLeaf(all_losses['loss_total']),
+                'positional': losses.LossLeaf(
+                    _GENOME_TRACK_POSITIONAL_WEIGHT * positional_loss
+                ),
+            }
+
+        return resolution_losses
 
 
 class ContactMapsHead(Head):
@@ -771,7 +805,7 @@ class ContactMapsHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
-        track_mask: torch.Tensor,
+        track_mask: _MetadataMask,
     ):
         super().__init__(
             name=name,
@@ -801,6 +835,8 @@ class ContactMapsHead(Head):
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predicts contact maps from embeddings."""
+        if embeddings.embeddings_pair is None:
+            raise ValueError('Pair embeddings are not present.')
         return {
             'predictions': self._forward(
                 embeddings.embeddings_pair, organism_index
@@ -811,7 +847,7 @@ class ContactMapsHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (targets := batch.contact_maps) is None:
             raise ValueError('contact_maps target not in batch.')
@@ -838,7 +874,7 @@ class ContactMapsHead(Head):
         )
         targets = torch.where(torch.isnan(targets), 0.0, targets)
         loss = losses.mse(contact_predictions, targets, targets_mask)
-        return {'loss': loss}
+        return {'mse': losses.LossLeaf(loss)}
 
 
 class SpliceSitesClassificationHead(Head):
@@ -850,7 +886,7 @@ class SpliceSitesClassificationHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
-        track_mask: torch.Tensor,
+        track_mask: _MetadataMask,
     ):
         super().__init__(
             name=name,
@@ -882,37 +918,46 @@ class SpliceSitesClassificationHead(Head):
         """Predicts splice site classification from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)
         logits = self._forward_logits(embeddings_1bp, organism_index)
-        probs = F.softmax(logits.to(torch.float32), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-        ) -> dict[str, torch.Tensor]:
-            """Returns the loss for the head."""
-            if (splice_sites := batch.splice_sites) is None:
-                raise ValueError('splice_sites target not in batch.')
-            logits = predictions['logits']
-            assert splice_sites.shape == logits.shape, \
-                    'Predictions shape does not match targets shape.'
-            
-            classification_mask = torch.any(splice_sites.bool(), dim=-1, keepdim=True)
-            classification_mask = self._combine_metadata_mask(
-                classification_mask,
-                name="_track_mask",
-                organism_index=batch.get_organism_index(),
-                ndim=splice_sites.ndim,
-            )
-            loss = losses.cross_entropy_loss_from_logits(
-                y_pred_logits=logits,
-                # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
-                y_true=(1.0 - 1e-7) * splice_sites.to(torch.float32)
-                + 1e-7 / self._num_tracks,
-                mask=classification_mask,
-                axis=-1,
-            )
-            return {'loss': loss}
+    ) -> dict[str, losses.MetricNode]:
+        """Returns the loss for the head."""
+        if (splice_sites := batch.splice_sites) is None:
+            raise ValueError('splice_sites target not in batch.')
+        logits = predictions['logits']
+        assert splice_sites.shape == logits.shape, \
+                'Predictions shape does not match targets shape.'
+
+        classification_mask = torch.any(
+            splice_sites.bool(),
+            dim=-1,
+            keepdim=True,
+        )
+        classification_mask = self._combine_metadata_mask(
+            classification_mask,
+            name="_track_mask",
+            organism_index=batch.get_organism_index(),
+            ndim=splice_sites.ndim,
+        )
+        loss = losses.cross_entropy_loss_from_logits(
+            y_pred_logits=logits,
+            # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
+            y_true=(1.0 - 1e-7) * splice_sites.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+            + 1e-7 / self._num_tracks,
+            mask=classification_mask,
+            axis=-1,
+        )
+        return {
+            'cross_entropy': losses.LossLeaf(loss),
+        }
 
 
 class SpliceSitesUsageHead(Head):
@@ -925,7 +970,7 @@ class SpliceSitesUsageHead(Head):
         num_organisms: int,
         channels: Channels,
         num_tracks: int,
-        track_mask: torch.Tensor,
+        track_mask: _MetadataMask,
     ):
         super().__init__(
             name=name,
@@ -957,14 +1002,16 @@ class SpliceSitesUsageHead(Head):
         """Predicts splice site usage from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)              # [B, S, C]
         logits = self._forward_logits(embeddings_1bp, organism_index)       # [B, S, T]
-        splice_site_usage = torch.sigmoid(logits.to(torch.float32)).to(torch.float16)
+        splice_site_usage = torch.sigmoid(
+            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
         return {'logits': logits, 'predictions': splice_site_usage}
 
     def loss(
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (splice_site_usage := batch.splice_site_usage) is None:
             raise ValueError('splice_site_usage target not in batch.')
@@ -981,10 +1028,12 @@ class SpliceSitesUsageHead(Head):
         )
         loss = losses.binary_crossentropy_from_logits(
             y_pred=logits,
-            y_true=torch.clamp(splice_site_usage.to(torch.float32), 1e-7, 1.0 - 1e-7),
+            y_true=torch.clamp(splice_site_usage.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), 1e-7, 1.0 - 1e-7),
             mask=mask,
         )
-        return {'loss': loss}
+        return {
+            'binary_cross_entropy': losses.LossLeaf(loss),
+        }
 
 
 class SpliceSitesJunctionHead(Head):
@@ -999,7 +1048,7 @@ class SpliceSitesJunctionHead(Head):
         max_seq_len: int,
         splice_site_channels: int,
         num_tissues: int,
-        tissue_mask: torch.Tensor,
+        tissue_mask: _MetadataMask,
     ):
         """Initializes the SpliceSitesJunctionHead module."""
         super().__init__(
@@ -1009,7 +1058,9 @@ class SpliceSitesJunctionHead(Head):
         )
         self._num_tissues = num_tissues
         self._num_tracks = 2 * self._num_tissues
-        self._register_metadata_mask("_tissue_mask", tissue_mask)
+        tissue_mask = torch.as_tensor(tissue_mask, dtype=torch.bool)
+        track_mask = self._get_track_mask(tissue_mask)
+        self._register_metadata_mask("_track_mask", track_mask)
         self._max_position_encoding_distance = max_seq_len
         self.in_channels = channels.get_num_channels(1)
         self._splice_site_channels = splice_site_channels
@@ -1019,34 +1070,78 @@ class SpliceSitesJunctionHead(Head):
             num_organisms=num_organisms,
         )
         shape = (self._num_organisms, 2, self._num_tissues, self._splice_site_channels)
-        self.pos_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.pos_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_acceptor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-        self.neg_donor_logits_embeddings = nn.Parameter(torch.zeros(shape))
-    
-    def _get_track_mask(self, tissue_mask) -> torch.Tensor:                     # tissue_mask: [B, #A, #D, T]
-        return torch.cat([tissue_mask, tissue_mask], dim=-1).to(torch.bool)     # [B, #A, #D, 2*T]
+
+        # Match AlphaGenome Research's hk.initializers.TruncatedNormal(0.1):
+        # https://github.com/google-deepmind/alphagenome_research/blob/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d/src/alphagenome_research/model/heads.py#L1126-L1135
+        # Haiku defaults to a zero mean and truncates at +/-2 standard
+        # deviations, or [-0.2, 0.2] here:
+        # https://github.com/google-deepmind/dm-haiku/blob/v0.0.17/haiku/_src/initializers.py#L97-L134
+        def _truncated_normal_parameter() -> nn.Parameter:
+            parameter = nn.Parameter(torch.empty(shape))
+            rope_std = 0.1
+            nn.init.trunc_normal_(
+                parameter,
+                mean=0.0,
+                std=rope_std,
+                a=-2.0 * rope_std,
+                b=2.0 * rope_std,
+            )
+            return parameter
+
+        self.pos_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.pos_donor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_acceptor_logits_embeddings = _truncated_normal_parameter()
+        self.neg_donor_logits_embeddings = _truncated_normal_parameter()
+
+    def _get_track_mask(self, tissue_mask: torch.Tensor) -> torch.Tensor:       # [*, T]
+        return torch.cat([tissue_mask, tissue_mask], dim=-1).to(torch.bool)     # [*, 2*T]
+
+    def _normalize_junction_mask(
+        self,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if mask.ndim != 4:
+            raise ValueError(
+                "splice_junctions_mask must have shape [B, #D, #A, T] or "
+                f"[B, #D, #A, 2*T], got {tuple(mask.shape)}."
+            )
+        if mask.shape[-1] == self._num_tissues:
+            mask = torch.cat([mask, mask], dim=-1)
+        elif mask.shape[-1] != self._num_tracks:
+            raise ValueError(
+                "splice_junctions_mask must have either one channel per "
+                f"tissue ({self._num_tissues}) or one channel per strand and "
+                f"tissue ({self._num_tracks}), got {mask.shape[-1]}."
+            )
+
+        return mask.to(torch.bool)
     
     def _forward(
         self,
         x: torch.Tensor,                        # [B, S, C]
         splice_site_positions: torch.Tensor,    # [B, 4, P]
         organism_index: torch.Tensor,           # [B]
-        tissue_mask: torch.Tensor | None,       # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,       # [B, #D, #A, T or 2*T]
     ) -> tuple[torch.Tensor, torch.Tensor]:     # both [B, D, A, 2*T]
         """Splice site junctions."""
         assert splice_site_positions.shape[1] == 4, \
             'splice_site_positions must have shape [B, 4, P] for 4 DNA base pairs.'
-        tissue_mask = self._combine_metadata_mask(
-            tissue_mask,
-            name="_tissue_mask",
-            organism_index=organism_index,
-            ndim=4,
-        )
         pos_donor_idx = splice_site_positions[:, 0, :]      # [B, D]
         pos_accept_idx = splice_site_positions[:, 1, :]     # [B, A]
         neg_donor_idx = splice_site_positions[:, 2, :]      # [B, D]
         neg_accept_idx = splice_site_positions[:, 3, :]     # [B, A]
+
+        batch_mask = (
+            self._normalize_junction_mask(tissue_mask)
+            if tissue_mask is not None
+            else None
+        )
+        track_mask = self._combine_metadata_mask(
+            batch_mask,
+            name="_track_mask",
+            organism_index=organism_index,
+            ndim=4,
+        )
 
         def _index_embedding(embedding, indices):
             # embedding: [B, S, C], indices: [B, P] (may contain -1)
@@ -1056,7 +1151,8 @@ class SpliceSitesJunctionHead(Head):
             return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
         def _apply_rope(x, indices, name: str):                                 # x: [B, S, C_splice] | indices: [B, P]
-            x = _index_embedding(x, indices).to(torch.float32)                  # [B, P, C_splice]
+            compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+            x = _index_embedding(x, indices).to(compute_uptype)                 # [B, P, C_splice]
             params = get_param_for_index(
                 getattr(self, f"{name}_embeddings"), organism_index
             )                                                                   # [B, 2, T, C_splice]
@@ -1066,7 +1162,7 @@ class SpliceSitesJunctionHead(Head):
             x = apply_rope(
                 x, indices, max_position=self._max_position_encoding_distance   # [B, P, T, C_splice]
             )
-            return x
+            return x.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
         
         splice_site_logits = self.multiorg_linear(x, organism_index)            # [B, S, C_splice]
 
@@ -1075,42 +1171,52 @@ class SpliceSitesJunctionHead(Head):
         neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
         neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
 
-        pos_counts = F.softplus(
-            torch.einsum(
-                'bdtc, batc -> bdat',
-                pos_donor_logits,
-                pos_accept_logits,
-            )
-        )   # [B, D, T, C_splice] x [B, A, T, C_splice] -> [B, D, A, T]
-        neg_counts = F.softplus(
-            torch.einsum(
-                'bdtc, batc -> bdat',
-                neg_donor_logits,
-                neg_accept_logits,
-            )
-        )   # [B, D, T, C_splice] x [B, A, T, C_splice] -> [B, D, A, T]
+        policy = _ACTIVE_DTYPE_POLICY.get()
 
-        # NOTE: The einsum for these masks is equivalent to an "and" operation
-        pos_mask = torch.einsum(
-            'bd,ba->bda', pos_donor_idx >= 0, pos_accept_idx >= 0
-        ).to(torch.float32)                                                     # [B, D, A]
-        neg_mask = torch.einsum(
-            'bd,ba->bda', neg_donor_idx >= 0, neg_accept_idx >= 0
-        ).to(torch.float32)                                                     # [B, D, A]
-        track_mask = self._get_track_mask(tissue_mask)                          # [B, #A, #D, 2*T]
+        # Output calculation (back to the compute dtype)
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Here, the donor and
+        # acceptor logits are already FP32 because they are produced by the FP32
+        # RoPE calculation. Upcasting them therefore skips the BF16 operand
+        # rounding performed by JAX and may change results.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            pos_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    pos_donor_logits.to(policy.compute_uptype),
+                    pos_accept_logits.to(policy.compute_uptype),
+                )
+            )
+            neg_counts = F.softplus(
+                torch.einsum(
+                    "bdtc,batc->bdat",
+                    neg_donor_logits.to(policy.compute_uptype),
+                    neg_accept_logits.to(policy.compute_uptype),
+                )
+            )
+        pos_counts = pos_counts.to(policy.compute_dtype)
+        neg_counts = neg_counts.to(policy.compute_dtype)
+
+        pos_mask = (pos_donor_idx >= 0)[:, :, None] & (
+            pos_accept_idx >= 0
+        )[:, None, :]                                                           # [B, D, A]
+        neg_mask = (neg_donor_idx >= 0)[:, :, None] & (
+            neg_accept_idx >= 0
+        )[:, None, :]                                                           # [B, D, A]
         pos_mask = (
             pos_mask[:, :, :, None]
-            * track_mask[:, :, :, :self._num_tissues]
-        )                                                                       # [B, D, A, 2*T]
+            & track_mask[:, :, :, :self._num_tissues].bool()
+        )                                                                       # [B, D, A, T]
         neg_mask = (
             neg_mask[:, :, :, None]
-            * track_mask[:, :, :, self._num_tissues:]
-        )                                                                       # [B, D, A, 2*T]
+            & track_mask[:, :, :, self._num_tissues:].bool()
+        )                                                                       # [B, D, A, T]
         
-        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)     # [B, D, A, 2*T]
+        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)         # [B, D, A, 2*T]
         pred_counts = torch.cat([pos_counts, neg_counts], dim=-1)               # [B, D, A, 2*T]
         pred_counts = torch.where(
-            splice_junctions_mask.bool(), pred_counts, 0
+            splice_junctions_mask, pred_counts, 0
         )
         return pred_counts, splice_junctions_mask
     
@@ -1118,7 +1224,7 @@ class SpliceSitesJunctionHead(Head):
         self,
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B]
-        tissue_mask: torch.Tensor | None,               # [B, #A, #D, T]
+        tissue_mask: torch.Tensor | None,               # [B, #D, #A, T or 2*T]
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings."""
@@ -1127,21 +1233,21 @@ class SpliceSitesJunctionHead(Head):
                 'splice_site_positions is required for junctions predictions.'
             )
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
-        splice_junctions, splice_junction_mask = self._forward(     # both [B, D, A, 2*T]
+        splice_junctions, splice_junction_mask = self._forward(         # both [B, D, A, 2*T]
            embeddings_1bp, splice_site_positions, 
            organism_index, tissue_mask
         )
         return {
-           'predictions': splice_junctions,                         # [B, D, A, 2*T]
+           'predictions': splice_junctions,                             # [B, D, A, 2*T]
            'splice_site_positions': splice_site_positions,              # [B, 4, P]
            'splice_junction_mask': splice_junction_mask                 # [B, D, A, 2*T]
         }
     
     def loss(
         self,
-        predictions: torch.Tensor,              # [B, ...]
+        predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-    ) -> torch.Tensor:
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (count_target := batch.splice_junctions) is None:
             raise ValueError('splice_junctions target not in batch.')
@@ -1149,7 +1255,7 @@ class SpliceSitesJunctionHead(Head):
         pred_pair = predictions['predictions']
         pairs_mask = predictions['splice_junction_mask']
         if batch.splice_junctions_mask is not None:
-            mask = self._get_track_mask(batch.splice_junctions_mask)
+            mask = self._normalize_junction_mask(batch.splice_junctions_mask)
             pairs_mask = pairs_mask.to(torch.bool) & mask.to(
                 device=pairs_mask.device,
                 dtype=torch.bool,
@@ -1166,16 +1272,16 @@ class SpliceSitesJunctionHead(Head):
         pairs_mask = pairs_mask.to(torch.bool)
         accept_total_loss = losses.poisson_loss(
             y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=torch.float32)
+               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
             ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=torch.float32),
+            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             mask=(pairs_mask.any(dim=-2)),
         )
         donor_total_loss = losses.poisson_loss(
             y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=torch.float32)
+               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
             ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=torch.float32),
+            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
             mask=(pairs_mask.any(dim=-3)),
         )
 
@@ -1192,12 +1298,28 @@ class SpliceSitesJunctionHead(Head):
             mask=pairs_mask,
             axis=-2,
         )
-        loss = (
-           donor_ratios_loss
-           + acceptor_ratios_loss
-           + 0.2 *(accept_total_loss + donor_total_loss)
-        )
-        return {'loss': loss}
+        return {
+            'ratios': {
+                'acceptor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * acceptor_ratios_loss
+                ),
+                'donor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * donor_ratios_loss
+                ),
+            },
+            'total_counts': {
+                'acceptor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
+                    * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
+                    * accept_total_loss
+                ),
+                'donor': losses.LossLeaf(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
+                    * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
+                    * donor_total_loss
+                ),
+            },
+        }
 
 
 class MaskedLanguageModelingHead(Head):
@@ -1239,14 +1361,17 @@ class MaskedLanguageModelingHead(Head):
         """Predicts masked language modeling from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
         logits = self.linear(embeddings_1bp)                            # [B, S, 5]
-        probs = F.softmax(logits.to(torch.float32), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (labels := batch.mlm) is None:
             raise ValueError('masked_lm_labels target not in batch.')
@@ -1255,6 +1380,12 @@ class MaskedLanguageModelingHead(Head):
         assert labels.shape == logits.shape[:-1], \
             'Predictions shape does not match targets shape.'
         
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), reduction='mean')
-        return {'loss': loss}
+        loss = F.cross_entropy(
+            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype).view(-1, logits.size(-1)),
+            labels.view(-1),
+            reduction='mean',
+        )
+        return {
+            'cross_entropy': losses.LossLeaf(loss),
+        }
     

@@ -117,18 +117,24 @@ class Metadata():
             raise ValueError("Use get_num_tissues for splice_sites_junction head.")
         if head_name == "masked_language_modeling":
             raise ValueError("The masked_language_modeling head does not have num_tracks.")
-        if "track_mask" in self.metadata["heads"][head_name]:
-            return len(self.metadata["heads"][head_name]["track_mask"][0])
-        return max(self.metadata["heads"][head_name]["num_tracks"])
+        head_metadata = self.metadata["heads"][head_name]
+        if "num_tracks" in head_metadata:
+            return max(head_metadata["num_tracks"])
+        return len(head_metadata["track_mask"][0])
     
     def get_num_tissues(self, head_name: str) -> int:
         if head_name != "splice_sites_junction":
             raise ValueError("get_num_tissues is only for splice_sites_junction head.")
-        if "tissue_mask" in self.metadata["heads"][head_name]:
-            return len(self.metadata["heads"][head_name]["tissue_mask"][0])
-        return max(self.metadata["heads"][head_name]["num_tissues"])
+        head_metadata = self.metadata["heads"][head_name]
+        if "num_tissues" in head_metadata:
+            return max(head_metadata["num_tissues"])
+        return len(head_metadata["tissue_mask"][0])
 
-    def get_means_organism(self, organism: Union[str, int], head_name: str) -> list[float]:
+    def get_means_organism(
+        self,
+        organism: Union[str, int],
+        head_name: str,
+    ) -> list[float] | torch.Tensor:
         """Returns the means for a given organism and head."""
         if isinstance(organism, str):
             organism = self.get_organism_index(organism)
@@ -138,7 +144,7 @@ class Metadata():
             return []
         return self.metadata["heads"][head_name]["means"][organism]
     
-    def get_means(self, head_name: str) -> torch.Tensor:
+    def get_means(self, head_name: str) -> list[list[float]] | torch.Tensor:
         """Returns the means for a given organism and head."""
         if head_name not in self.metadata["heads"]:
             return []
@@ -146,7 +152,11 @@ class Metadata():
             return []
         return self.metadata["heads"][head_name]["means"]
     
-    def get_track_mask_organism(self, organism: Union[str, int], head_name: str) -> torch.Tensor:
+    def get_track_mask_organism(
+        self,
+        organism: Union[str, int],
+        head_name: str,
+    ) -> list[bool] | torch.Tensor:
         """
         Returns a boolean mask of shape [T] indicating which tracks are valid.
         This mask indicates whether the tracks for that organism were padded and
@@ -168,7 +178,11 @@ class Metadata():
             return track_mask
         return self.metadata["heads"][head_name]["track_mask"][organism]
     
-    def get_tissue_mask_organism(self, organism: Union[str, int], head_name: str) -> torch.Tensor:
+    def get_tissue_mask_organism(
+        self,
+        organism: Union[str, int],
+        head_name: str,
+    ) -> list[bool] | torch.Tensor:
         """
         Returns a boolean mask of shape [T] indicating which tissues are valid.
         This mask indicates whether the tissues for that organism were padded and
@@ -188,7 +202,7 @@ class Metadata():
             return tissue_mask
         return self.metadata["heads"][head_name]["tissue_mask"][organism]
     
-    def get_track_mask(self, head_name: str) -> torch.Tensor:
+    def get_track_mask(self, head_name: str) -> list[list[bool]] | torch.Tensor:
         """
         Returns a boolean mask of shape [O, T] indicating which tracks are valid 
         for each organism.
@@ -205,11 +219,14 @@ class Metadata():
             track_mask = torch.zeros((num_organisms, max_tracks), dtype=torch.bool)
             for organism_index in range(num_organisms):
                 organism = self.get_organism(organism_index)
-                track_mask[organism_index] = self.get_track_mask_organism(organism, head_name)
+                track_mask[organism_index] = torch.as_tensor(
+                    self.get_track_mask_organism(organism, head_name),
+                    dtype=torch.bool,
+                )
             return track_mask
         return self.metadata["heads"][head_name]["track_mask"]
     
-    def get_tissue_mask(self, head_name: str) -> torch.Tensor:
+    def get_tissue_mask(self, head_name: str) -> list[list[bool]] | torch.Tensor:
         """
         Returns a boolean mask of shape [O, T] indicating which tissues are valid 
         for each organism.
@@ -224,7 +241,10 @@ class Metadata():
             tissue_mask = torch.zeros((num_organisms, max_tissues), dtype=torch.bool)
             for organism_index in range(num_organisms):
                 organism = self.get_organism(organism_index)
-                tissue_mask[organism_index] = self.get_tissue_mask_organism(organism, head_name)
+                tissue_mask[organism_index] = torch.as_tensor(
+                    self.get_tissue_mask_organism(organism, head_name),
+                    dtype=torch.bool,
+                )
             return tissue_mask
         return self.metadata["heads"][head_name]["tissue_mask"]
     
@@ -238,7 +258,11 @@ class Metadata():
             raise ValueError("Use get_multiorg_tissue_mask for splice_sites_junction head.")
         if head_name == "masked_language_modeling":
             raise ValueError("The masked_language_modeling head does not have a track mask.")
-        track_mask = self.get_track_mask(head_name)     # [O, T]
+        track_mask = torch.as_tensor(
+            self.get_track_mask(head_name),
+            dtype=torch.bool,
+            device=organism_index.device,
+        )                                               # [O, T]
         return track_mask[organism_index]               # [B, T]
     
     def get_multiorg_tissue_mask(self, head_name: str, organism_index: torch.Tensor) -> torch.Tensor:
@@ -249,10 +273,14 @@ class Metadata():
         """
         if head_name != "splice_sites_junction":
             raise ValueError("get_multiorg_tissue_mask is only for splice_sites_junction head.")
-        tissue_mask = self.get_tissue_mask(head_name)   # [O, T]
+        tissue_mask = torch.as_tensor(
+            self.get_tissue_mask(head_name),
+            dtype=torch.bool,
+            device=organism_index.device,
+        )                                               # [O, T]
         return tissue_mask[organism_index]              # [B, T]
 
-    def make_track_mask(self, head_name: str) -> torch.Tensor:
+    def make_track_mask(self, head_name: str) -> None:
         """
         Creates a boolean mask of shape [O, T] indicating which tracks are valid for each organism.
         This is used to create the track mask if it is not provided in the metadata.
@@ -264,7 +292,7 @@ class Metadata():
         track_mask = self.get_track_mask(head_name)
         self.metadata["heads"][head_name]["track_mask"] = track_mask
     
-    def make_tissue_mask(self, head_name: str) -> torch.Tensor:
+    def make_tissue_mask(self, head_name: str) -> None:
         """
         Creates a boolean mask of shape [O, T] indicating which tissues are valid for each organism.
         This is used to create the tissue mask if it is not provided in the metadata.

@@ -15,6 +15,7 @@ from alphagenome_pt import (
     FOLD_NAMES,
     HeadLoadSpec,
     HeadName,
+    Metadata,
     OrganismLoadSpec,
     deepmind_config,
     deepmind_metadata,
@@ -612,19 +613,40 @@ def test_load_deepmind_state_rejects_non_loadable_shape_mismatch(tmp_path):
 
 
 ### METADATA LOADING ###
-def test_deepmind_config_accepts_custom_metadata():
+@pytest.mark.parametrize(
+    "as_metadata_object",
+    [False, True],
+    ids=["dict", "Metadata"],
+)
+def test_deepmind_config_accepts_custom_metadata(as_metadata_object):
+    metadata_dict = {
+        "organisms": ["human"],
+        "heads": {MLM_HEAD_NAME: {}},
+    }
+    metadata = Metadata(metadata_dict) if as_metadata_object else metadata_dict
+
+    cfg = deepmind_config(metadata=metadata)
+
+    assert cfg.max_seq_len == 1_048_576
+    assert not cfg.min_zero_multinomial_loss
+    assert cfg.dtype_policy == "deepmind"
+    assert cfg.init_scale == 0.1
+    assert cfg.metadata.get_num_organisms() == 1
+    assert cfg.metadata.get_organisms() == ["human"]
+    assert cfg.metadata.get_heads() == [MLM_HEAD_NAME]
+    assert cfg.metadata.metadata["heads"][MLM_HEAD_NAME] == {}
+
+
+@pytest.mark.parametrize("dtype_policy", ["deepmind", "float32", "float64"])
+def test_deepmind_config_selects_dtype_policy(dtype_policy):
     metadata = {
         "organisms": ["human"],
         "heads": {MLM_HEAD_NAME: {}},
     }
 
-    cfg = deepmind_config(metadata=metadata)
+    cfg = deepmind_config(metadata=metadata, dtype_policy=dtype_policy)
 
-    assert cfg.max_seq_len == 1_048_576
-    assert cfg.metadata.get_num_organisms() == 1
-    assert cfg.metadata.get_organisms() == ["human"]
-    assert cfg.metadata.get_heads() == [MLM_HEAD_NAME]
-    assert cfg.metadata.metadata["heads"][MLM_HEAD_NAME] == {}
+    assert cfg.dtype_policy == dtype_policy
 
 
 def test_deepmind_metadata_loads_local_converted_metadata(tmp_path):
@@ -713,7 +735,16 @@ def test_load_deepmind_state_uses_cwd_for_local_filename_without_local_dir(tmp_p
     assert load_result.unexpected_keys == []
 
 
-def test_load_deepmind_model_can_load_state(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "as_metadata_object",
+    [False, True],
+    ids=["dict", "Metadata"],
+)
+def test_load_deepmind_model_can_load_state(
+    monkeypatch,
+    tmp_path,
+    as_metadata_object,
+):
     # NOTE: we could do this test without monkeypatching the small
     # model, but using the full model size would be slow
     def fake_alphagenome(config):
@@ -721,10 +752,11 @@ def test_load_deepmind_model_can_load_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr("alphagenome_pt.checkpoint.AlphaGenome", fake_alphagenome)
 
-    metadata = {
+    metadata_dict = {
         "organisms": ["human"],
         "heads": {},
     }
+    metadata = Metadata(metadata_dict) if as_metadata_object else metadata_dict
     source_model = small_alphagenome(deepmind_config(metadata=metadata).metadata)
     _fill_model_state(source_model, 1.0)
 
@@ -741,6 +773,42 @@ def test_load_deepmind_model_can_load_state(monkeypatch, tmp_path):
 
     assert isinstance(model, torch.nn.Module)
     _assert_equal_keys(source_state, model, EXAMPLE_ALWAYS_LOADED_KEYS)
+
+
+def test_deepmind_model_passes_local_dir_to_metadata_and_state(
+    monkeypatch,
+    tmp_path,
+):
+    metadata_dirs = []
+    state_dirs = []
+
+    def fake_deepmind_metadata(*, metadata_dir=None, **kwargs):
+        metadata_dirs.append(metadata_dir)
+        return {
+            "organisms": ["human"],
+            "heads": {},
+        }
+
+    def fake_load_deepmind_state(model, *, local_dir=None, **kwargs):
+        state_dirs.append(local_dir)
+
+    def fake_alphagenome(config):
+        return small_alphagenome(config.metadata)
+
+    monkeypatch.setattr(
+        "alphagenome_pt.checkpoint.deepmind_metadata",
+        fake_deepmind_metadata,
+    )
+    monkeypatch.setattr(
+        "alphagenome_pt.checkpoint.load_deepmind_state",
+        fake_load_deepmind_state,
+    )
+    monkeypatch.setattr("alphagenome_pt.checkpoint.AlphaGenome", fake_alphagenome)
+
+    deepmind_model(load_state=True, local_dir=tmp_path)
+
+    assert metadata_dirs == [tmp_path]
+    assert state_dirs == [tmp_path]
 
 
 def test_deepmind_model_passes_repo_dir_to_metadata(monkeypatch):
@@ -772,6 +840,7 @@ def test_deepmind_model_passes_repo_dir_to_metadata(monkeypatch):
     assert isinstance(model, torch.nn.Module)
     assert metadata_calls == [
         {
+            "metadata_dir": None,
             "repo_id": "repo",
             "repo_dir": "v_test",
             "token": "token",

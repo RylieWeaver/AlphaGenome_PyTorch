@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 # Internal
 from .distributed import is_dist, dist_sum
+from .precision import _ACTIVE_DTYPE_POLICY
 
 
 
@@ -56,25 +57,27 @@ class BatchNorm(nn.Module):
         self.register_buffer("var_EMA", torch.ones(num_channels))
 
     def _maybe_synced_mean(self, x, reduce_dims):
+        stats_dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
         if self.sync and is_dist():
-            total = x.sum(dim=reduce_dims)
-            count = torch.ones_like(x).sum(dim=reduce_dims)
+            total = x.sum(dim=reduce_dims, dtype=stats_dtype)
+            count = torch.ones_like(x).sum(dim=reduce_dims, dtype=stats_dtype)
             total = dist_sum(total)
             count = dist_sum(count)
             mean = (total / count)
         else:
-            mean = x.mean(dim=reduce_dims)
+            mean = x.mean(dim=reduce_dims, dtype=stats_dtype)
         return mean
 
     def _maybe_synced_mean_square(self, x, reduce_dims):
+        stats_dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
         if self.sync and is_dist():
-            sum_square = torch.square(x).sum(dim=reduce_dims)
-            count = torch.ones_like(x).sum(dim=reduce_dims)
+            sum_square = torch.square(x).sum(dim=reduce_dims, dtype=stats_dtype)
+            count = torch.ones_like(x).sum(dim=reduce_dims, dtype=stats_dtype)
             sum_square = dist_sum(sum_square)
             count = dist_sum(count)
             var = (sum_square / count)
         else:
-            var = torch.square(x).mean(dim=reduce_dims)
+            var = torch.square(x).mean(dim=reduce_dims, dtype=stats_dtype)
         return var
 
     def forward(self, x):
@@ -111,8 +114,10 @@ class BatchNorm(nn.Module):
         #     warnings.warn(f"Low variance detected in BatchNorm: var={var.min().item():.4e}")
 
         # Apply
-        rms = torch.sqrt(var + self.eps)
-        y = (x / rms.view(stats_shape)) * self.scale.view(stats_shape) + self.offset.view(stats_shape)
+        scale = self.scale.to(x.dtype).view(stats_shape)
+        offset = self.offset.to(x.dtype).view(stats_shape)
+        inv = scale * torch.rsqrt(var.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + self.eps).to(x.dtype).view(stats_shape)
+        y = x * inv + offset
         return y
 
 
@@ -150,11 +155,19 @@ class LayerNorm(nn.Module):
         )
         
         # Compute stats
+        stats_dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
         if not self.rms_norm:
-            x = x - x.mean(dim=channels_dim, keepdim=True)              # [B, C, S] -> [B, 1, S] if channels_dim=1
-        var = torch.square(x).mean(dim=channels_dim, keepdim=True)
+            mean = x.mean(
+                dim=channels_dim, dtype=stats_dtype, keepdim=True
+            ).to(x.dtype)
+            x = x - mean
+        var = torch.square(x).mean(
+            dim=channels_dim, dtype=stats_dtype, keepdim=True
+        )
 
         # Apply normalization
-        rms = torch.sqrt(var + self.eps)
-        y = (x / rms) * self.scale.view(stats_shape) + self.offset.view(stats_shape)
+        scale = self.scale.to(x.dtype).view(stats_shape)
+        offset = self.offset.to(x.dtype).view(stats_shape)
+        inv = scale * torch.rsqrt(var + self.eps).to(x.dtype)
+        y = inv * x + offset
         return y

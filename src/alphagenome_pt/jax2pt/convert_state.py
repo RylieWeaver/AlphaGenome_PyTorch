@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # External
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
 import torch
 
@@ -41,7 +42,7 @@ def convert_fold(fold: str, *, model_path: Path | None, torch_output_dir: Path, 
     return output
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     checkpoint_group = parser.add_mutually_exclusive_group()
     checkpoint_group.add_argument(
@@ -63,8 +64,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Local official JAX checkpoint directory. If set, it must contain "
-            "checkpoint files named alphagenome_{fold_name}.pt."
+            "Parent directory containing JAX checkpoint directories named by fold."
         ),
     )
     parser.add_argument(
@@ -79,13 +79,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for JAX checkpoint loading. Defaults to CPU. Examples: cpu, gpu, cuda, mps.",
+        help="Device used for JAX checkpoint loading. Defaults to CPU.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
     torch_output_dir = args.torch_output_dir.expanduser().resolve()
     jax_input_dir = None
     if args.jax_input_dir is not None:
@@ -95,7 +95,7 @@ def main() -> None:
 
     outputs = []
     for fold in folds:
-        model_path = None if jax_input_dir is None else jax_input_dir / fold_filename(fold)
+        model_path = None if jax_input_dir is None else jax_input_dir / fold
         outputs.append(
             convert_fold(
                 fold,
