@@ -43,6 +43,8 @@ uv pip install alphagenome-pt
 rm -rf dist build
 uvx --from build pyproject-build
 uvx twine check dist/*
+uvx twine upload --verbose dist/*
+
 uvx twine upload --repository testpypi dist/* --verbose
 
 # Notes:
