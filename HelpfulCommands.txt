@@ -15,7 +15,7 @@ rm -rf dist/ build/ *.egg-info src/*.egg-info
 uvx --from build pyproject-build
 
 # Option B: if build is already in your dev dependencies
-# uv run python -m build
+uv run python -m build
 
 # 4. Optional: sanity check
 uvx twine check dist/*
@@ -31,7 +31,7 @@ uv pip install \
   --index-strategy unsafe-best-match \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  "alphagenome-pt==0.3.0rc3"
+  "alphagenome-pt==0.4.0rc1"
 
 # 6. Upload to PyPI and Test Install
 uvx twine upload --verbose dist/*
