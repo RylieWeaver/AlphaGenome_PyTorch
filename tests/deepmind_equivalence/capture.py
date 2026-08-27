@@ -12,7 +12,7 @@ from .precision import (
     use_dtype_policy,
     use_jax_compute_uptype_policy,
 )
-from .utils import _numpy, jax_device, use_jax_junction_padding_mask
+from .utils import jax_device, use_jax_junction_padding_mask
 
 
 ##### CONSTANTS #####
@@ -97,7 +97,14 @@ def run_pytorch(
                 if len(path) == 3 and path[1].endswith("bp")
             })
         captured.update(shared_head_outputs(predictions))
-        captured = {name: _numpy(value) for name, value in captured.items()}
+        # Keep framework dtypes intact for the equivalence report. Numerical
+        # conversion happens only after record_and_assert_close observes them.
+        captured = {
+            name: value.detach().cpu()
+            if isinstance(value, torch.Tensor)
+            else value
+            for name, value in captured.items()
+        }
 
         del predictions, embeddings, batch
         if include_loss:

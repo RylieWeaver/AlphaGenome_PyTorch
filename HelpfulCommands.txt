@@ -40,8 +40,13 @@ uvx twine upload --verbose dist/*
 uv pip install alphagenome-pt
 
 # Notes:
-Sometimes copying past API token doesn't work... maybe because of copy-paste weirdness.
+Sometimes copying-pasting API token doesn't work... maybe because of copy-paste weirdness.
 It's brute force but as a last resort can just create a new one.
+
+
+### Build and View Docs ###
+python -m sphinx -E -W -b html docs docs/_build/html
+python -m http.server 8000 --directory docs/_build/html
 
 
 ### Run Tests ###

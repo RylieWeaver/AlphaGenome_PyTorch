@@ -11,7 +11,7 @@ from .precision import (
     use_jax_compute_uptype_policy,
 )
 from .format_report import write_markdown_report
-from .utils import difference_metrics
+from .utils import difference_metrics, dtype_name
 
 # Don't preallocate GPU memory for JAX so that PyTorch can use it
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -33,6 +33,9 @@ class PrecisionReport:
         "reference_mean_abs",
         "exact_fraction",
         "num_values",
+        "pytorch_dtype",
+        "jax_dtype",
+        "dtype_match",
     )
 
     def __init__(self):
@@ -114,6 +117,9 @@ def record_and_assert_close(request, precision_report_session):
         nonlocal comparison_index
         comparison_index += 1
         representation = name or f"comparison_{comparison_index}"
+        pytorch_dtype = dtype_name(pytorch_value)
+        jax_dtype = dtype_name(jax_value)
+        dtype_match = pytorch_dtype == jax_dtype
         metrics = difference_metrics(
             pytorch_value,
             jax_value,
@@ -123,10 +129,19 @@ def record_and_assert_close(request, precision_report_session):
             request.node.nodeid,
             dtype_policy,
             representation,
-            metrics,
+            {
+                **metrics,
+                "pytorch_dtype": pytorch_dtype,
+                "jax_dtype": jax_dtype,
+                "dtype_match": dtype_match,
+            },
         )
 
         failures = []
+        if not dtype_match:
+            failures.append(
+                f"dtype mismatch: PyTorch {pytorch_dtype}, JAX {jax_dtype}"
+            )
         for metric, threshold in (
             ("relative_L2", relative_L2_threshold),
             ("relative_Linf", relative_Linf_threshold),

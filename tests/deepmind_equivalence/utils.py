@@ -4,6 +4,14 @@ import numpy as np
 import torch
 
 
+def dtype_name(value):
+    """Return a framework-independent name for a value's observed dtype."""
+    dtype = getattr(value, "dtype", None)
+    if dtype is None:
+        dtype = np.asarray(value).dtype
+    return str(dtype).removeprefix("torch.")
+
+
 def jax_device(device):
     """Resolve a PyTorch-style device string to the corresponding JAX device."""
     import jax

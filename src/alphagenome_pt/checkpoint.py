@@ -872,6 +872,7 @@ def load_deepmind_state(
     )
 
     load_result = model.load_state_dict(state_dict, strict=False, assign=assign)
+    model.to(dtype=model.dtype_policy.parameter_dtype)
     missing_keys = [
         key
         for key in load_result.missing_keys

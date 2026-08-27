@@ -134,17 +134,10 @@ or download the
 | `reference_mean_abs` | Mean absolute JAX-reference value. |
 | `exact_fraction` | Fraction of finite values that match exactly. |
 | `num_values` | Number of finite values included in the metrics. |
+| `pytorch_dtype` | Observed dtype of the PyTorch representation. |
+| `jax_dtype` | Observed dtype of the JAX representation. |
+| `dtype_match` | Whether the observed framework dtypes match. A mismatch fails the test. |
 :::
-
-:::{dropdown} Full equivalence report
-:color: info
-:icon: info
-
-```{include} ../../tests/deepmind_equivalence/report.md
-:start-line: 2
-```
-:::
-
 
 To use chromosome-1 reference sequence instead of synthetic DNA, first download
 1,048,576 bases each for human and mouse:
@@ -162,12 +155,28 @@ python -m pytest \
   tests/deepmind_equivalence/ \
   --run-equivalence \
   --checkpoint-equivalence-device cuda \
-  --equivalence-sequence-length 4096 \
+  --equivalence-sequence-length 131072 \
   --equivalence-report tests/deepmind_equivalence/report.csv \
   --equivalence-dna \
     tests/deepmind_equivalence/dna/human_hg38_chr1.fa \
     tests/deepmind_equivalence/dna/mouse_mm39_chr1.fa
 ```
+
+The checked-in
+[full equivalence report](https://github.com/RylieWeaver/AlphaGenome_PyTorch/blob/main/tests/deepmind_equivalence/report.md)
+and its
+[downloadable CSV](https://raw.githubusercontent.com/RylieWeaver/AlphaGenome_PyTorch/main/tests/deepmind_equivalence/report.csv)
+were generated from this 131,072-bp human and mouse reference-sequence
+comparison.
+
+:::{dropdown} Full equivalence report
+:color: info
+:icon: info
+
+```{include} ../../tests/deepmind_equivalence/report.md
+:start-line: 2
+```
+:::
 
 :::{dropdown} Custom DNA input
 :class: note

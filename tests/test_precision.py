@@ -11,12 +11,35 @@ from alphagenome_pt import (
     synthetic_metadata,
 )
 from alphagenome_pt.precision import FLOAT64_DTYPE_POLICY
+from alphagenome_pt.checkpoint import load_deepmind_state
 
 
 ### TESTS ###
 def test_policy_rejects_compute_uptype_narrower_than_compute_dtype():
     with pytest.raises(ValueError, match="at least as precise"):
         replace(FLOAT64_DTYPE_POLICY, compute_uptype=torch.float32)
+
+
+def test_checkpoint_assignment_restores_parameter_dtype(tmp_path):
+    source = small_alphagenome(dtype_policy="float32")
+    checkpoint_path = tmp_path / "state.pt"
+    torch.save(source.state_dict(), checkpoint_path)
+
+    target = small_alphagenome(dtype_policy="float64")
+    load_deepmind_state(
+        target,
+        local_dir=tmp_path,
+        local_filename=checkpoint_path.name,
+        assign=True,
+    )
+
+    floating_state = [
+        value
+        for value in target.state_dict().values()
+        if value.is_floating_point()
+    ]
+    assert floating_state
+    assert all(value.dtype == torch.float64 for value in floating_state)
 
 
 @pytest.mark.parametrize(
@@ -63,7 +86,9 @@ def test_model_policy_normalizes_input_and_output_dtypes(
     )
 
 
-def test_float64_model_loss_uses_float64_policy():
+@pytest.mark.parametrize("policy_name", ("deepmind", "float32", "float64"))
+def test_model_loss_returns_output_dtype(policy_name):
+    policy = get_dtype_policy(policy_name)
     metadata = synthetic_metadata((HeadName.MASKED_LANGUAGE_MODELING,))
     model = small_alphagenome(
         metadata,
@@ -71,10 +96,14 @@ def test_float64_model_loss_uses_float64_policy():
         num_channels=16,
         transformer_layers=1,
         sync_bn=False,
-        dtype_policy="float64",
+        dtype_policy=policy_name,
     )
     batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
 
     result = model.loss(batch)
 
-    assert result.total.dtype == torch.float64
+    assert result.total.dtype == policy.output_dtype
+    assert all(
+        leaf.value.dtype == policy.output_dtype
+        for _, leaf in result.tree.iter_leaves()
+    )

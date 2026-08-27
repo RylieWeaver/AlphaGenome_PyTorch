@@ -460,17 +460,23 @@ class MultiOrganismLinear(nn.Module):
         x: torch.Tensor,                    # [B, *, D_in]
         organism_index: torch.Tensor,       # [B]
     ) -> torch.Tensor:
-        w = get_param_for_index(self.weight, organism_index).to(x.dtype)
+        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        w = get_param_for_index(self.weight, organism_index).to(compute_uptype)
         b = get_param_for_index(self.bias, organism_index).to(x.dtype)
         num_inner_dims = x.ndim - 2
         target_b_shape = (b.shape[0],) + (1,) * num_inner_dims + (b.shape[1],)
 
-        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
+        # request a separate accumulation dtype here while retaining autograd, so
+        # the operands are upcast before the contraction. Keeping the weight in
+        # its FP32 parameter dtype skips JAX's BF16 operand rounding and may
+        # change results. The bias is not part of the contraction, so it is first
+        # rounded to the compute dtype to preserve JAX's bias rounding.
         with torch.autocast(device_type=x.device.type, enabled=False):
             x = torch.einsum(
                 "b...i,bij->b...j",
                 x.to(compute_uptype),
-                w.to(compute_uptype),
+                w,
             )
         return x + b.to(compute_uptype).reshape(target_b_shape)
 
@@ -690,7 +696,9 @@ class GenomeTracksHead(Head):
         x = embeddings.get_sequence_embeddings(resolution)              # [B, S, C]
         x = self.multiorg_linear[str(resolution)](x, organism_index)    # [B, S, T]
         residual_scale = get_param_for_index(self.residual_scales[str(resolution)], organism_index)
-        return F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        return (
+            F.softplus(x) * F.softplus(residual_scale[:, None, :])
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
     
     def forward(
         self,
@@ -910,7 +918,10 @@ class SpliceSitesClassificationHead(Head):
         """Predicts splice site classification from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)
         logits = self._forward_logits(embeddings_1bp, organism_index)
-        probs = F.softmax(logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(
@@ -991,7 +1002,9 @@ class SpliceSitesUsageHead(Head):
         """Predicts splice site usage from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)              # [B, S, C]
         logits = self._forward_logits(embeddings_1bp, organism_index)       # [B, S, T]
-        splice_site_usage = torch.sigmoid(logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)).to(torch.float16)
+        splice_site_usage = torch.sigmoid(
+            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+        ).to(_ACTIVE_DTYPE_POLICY.get().compute_dtype)
         return {'logits': logits, 'predictions': splice_site_usage}
 
     def loss(
@@ -1149,7 +1162,7 @@ class SpliceSitesJunctionHead(Head):
             x = apply_rope(
                 x, indices, max_position=self._max_position_encoding_distance   # [B, P, T, C_splice]
             )
-            return x
+            return x.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
         
         splice_site_logits = self.multiorg_linear(x, organism_index)            # [B, S, C_splice]
 
@@ -1158,29 +1171,32 @@ class SpliceSitesJunctionHead(Head):
         neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
         neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
 
-        compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        policy = _ACTIVE_DTYPE_POLICY.get()
 
+        # Output calculation (back to the compute dtype)
         # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
         # request a separate accumulation dtype here while retaining autograd, so
         # the operands are upcast before the contraction. Here, the donor and
-        # acceptor logits are already FP32 because `_apply_rope` produces FP32.
-        # Upcasting them therefore skips the BF16 operand rounding performed by
-        # JAX and may change results.
+        # acceptor logits are already FP32 because they are produced by the FP32
+        # RoPE calculation. Upcasting them therefore skips the BF16 operand
+        # rounding performed by JAX and may change results.
         with torch.autocast(device_type=x.device.type, enabled=False):
             pos_counts = F.softplus(
                 torch.einsum(
                     "bdtc,batc->bdat",
-                    pos_donor_logits.to(compute_uptype),
-                    pos_accept_logits.to(compute_uptype),
+                    pos_donor_logits.to(policy.compute_uptype),
+                    pos_accept_logits.to(policy.compute_uptype),
                 )
             )
             neg_counts = F.softplus(
                 torch.einsum(
                     "bdtc,batc->bdat",
-                    neg_donor_logits.to(compute_uptype),
-                    neg_accept_logits.to(compute_uptype),
+                    neg_donor_logits.to(policy.compute_uptype),
+                    neg_accept_logits.to(policy.compute_uptype),
                 )
             )
+        pos_counts = pos_counts.to(policy.compute_dtype)
+        neg_counts = neg_counts.to(policy.compute_dtype)
 
         pos_mask = (pos_donor_idx >= 0)[:, :, None] & (
             pos_accept_idx >= 0
@@ -1197,7 +1213,7 @@ class SpliceSitesJunctionHead(Head):
             & track_mask[:, :, :, self._num_tissues:].bool()
         )                                                                       # [B, D, A, T]
         
-        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)     # [B, D, A, 2*T]
+        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)         # [B, D, A, 2*T]
         pred_counts = torch.cat([pos_counts, neg_counts], dim=-1)               # [B, D, A, 2*T]
         pred_counts = torch.where(
             splice_junctions_mask, pred_counts, 0
@@ -1217,12 +1233,12 @@ class SpliceSitesJunctionHead(Head):
                 'splice_site_positions is required for junctions predictions.'
             )
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
-        splice_junctions, splice_junction_mask = self._forward(     # both [B, D, A, 2*T]
+        splice_junctions, splice_junction_mask = self._forward(         # both [B, D, A, 2*T]
            embeddings_1bp, splice_site_positions, 
            organism_index, tissue_mask
         )
         return {
-           'predictions': splice_junctions,                         # [B, D, A, 2*T]
+           'predictions': splice_junctions,                             # [B, D, A, 2*T]
            'splice_site_positions': splice_site_positions,              # [B, 4, P]
            'splice_junction_mask': splice_junction_mask                 # [B, D, A, 2*T]
         }
@@ -1345,7 +1361,10 @@ class MaskedLanguageModelingHead(Head):
         """Predicts masked language modeling from embeddings."""
         embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
         logits = self.linear(embeddings_1bp)                            # [B, S, 5]
-        probs = F.softmax(logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), dim=-1)
+        policy = _ACTIVE_DTYPE_POLICY.get()
+        probs = F.softmax(logits.to(policy.compute_uptype), dim=-1).to(
+            policy.compute_dtype
+        )
         return {'logits': logits, 'predictions': probs}
 
     def loss(

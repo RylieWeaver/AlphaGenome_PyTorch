@@ -24,7 +24,6 @@ from .precision import (
     use_jax_compute_uptype_policy,
 )
 from .utils import (
-    _numpy,
     jax_device,
     linspace_values,
     normal_values,
@@ -617,11 +616,13 @@ def test_rna_seq_head(checkpoint_models, pt_dtype_policy, record_and_assert_clos
         "scaled_predictions_128bp",
         "predictions_128bp",
     ):
-        torch_value = _numpy(torch_predictions[name])
-        jax_value = _numpy(jax_predictions[name])
-        mask = np.broadcast_to(track_mask[:, None, :], jax_value.shape)
+        torch_value = torch_predictions[name].detach().cpu()
+        jax_value = jax_predictions[name]
+        mask = np.broadcast_to(
+            track_mask[:, None, :], jax_value.shape
+        ).copy()
         record_and_assert_close(
-            torch_value[mask],
+            torch_value[torch.from_numpy(mask)],
             jax_value[mask],
             name=name,
             dtype_policy=pt_dtype_policy.name,
@@ -846,8 +847,8 @@ def test_full_model(checkpoint_models, pt_dtype_policy, record_and_assert_close,
             )
             track_mask = np.broadcast_to(
                 track_mask[:, None, :], pytorch_value.shape
-            )
-            pytorch_value = pytorch_value[track_mask]
+            ).copy()
+            pytorch_value = pytorch_value[torch.from_numpy(track_mask)]
             jax_value = jax_value[track_mask]
         if name == "heads/splice_sites_junction/predictions":
             representation = "junction"

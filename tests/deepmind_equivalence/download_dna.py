@@ -1,4 +1,17 @@
-"""Download deterministic chromosome-1 DNA chunks for equivalence tests."""
+"""Download deterministic chromosome-1 DNA chunks for equivalence tests.
+
+Sequences come from the UCSC Genome Browser REST API:
+https://genome.ucsc.edu/goldenPath/help/api.html
+
+UCSC states that its API needs no separate license and that its raw data are
+available for public and commercial use. Review the current terms before reuse:
+
+- Licensing: https://genome.ucsc.edu/license/
+- Conditions of use: https://genome.ucsc.edu/conditions.html
+- Assembly credits: https://genome.ucsc.edu/goldenPath/credits
+- hg38 data: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/
+- mm39 data: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/
+"""
 
 # External
 import argparse
@@ -13,12 +26,13 @@ ASSEMBLIES = {
     "human": "hg38",
     "mouse": "mm39",
 }
+UCSC_SEQUENCE_API = "https://api.genome.ucsc.edu/getData/sequence"
 
 
 def _sequence(assembly, start, end):
     url = (
-        "https://api.genome.ucsc.edu/getData/sequence"
-        f"?genome={assembly};chrom=chr1;start={start};end={end}"
+        f"{UCSC_SEQUENCE_API}?genome={assembly};chrom=chr1;"
+        f"start={start};end={end}"
     )
     request = Request(
         url,

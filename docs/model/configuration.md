@@ -162,13 +162,18 @@ The dtype policies balance computational speed/memory and numerical precision.
 `deepmind` is the default and matches the published JAX mixed-precision policy.
 `float64` offers the highest precision but is intended mainly for numerical
 validation because it requires the most time and memory.
+
+`Outputs` refers to values returned by the public `embed()`, `predict()`, and
+`loss()` methods. The complete `LossOutput`, including its metric tree and
+total, is cast to `output_dtype`. Internal embeddings and predictions remain in
+their compute dtypes as they pass between model stages.
 :::
 
 :::{dropdown} What Is Affected by Compute Uptype?
 :class: note
 The compute uptype is generally used to upcast numerically sensitive operations
-(e.g., normalization statistics, attention and splice-junction dot-product
-accumulations, softmax, and loss reductions).
+(e.g., normalization statistics, attention and splice-junction contractions,
+softmax, and loss reductions).
 :::
 
 

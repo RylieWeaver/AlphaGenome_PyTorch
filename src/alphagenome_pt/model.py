@@ -437,7 +437,7 @@ class AlphaGenome(nn.Module):
             metadata=self.metadata,
         )
 
-        # Cast model parameters with precision policy
+        # Cast model parameters and persistent state with the precision policy.
         self.to(dtype=self.dtype_policy.parameter_dtype)
 
     @property
@@ -748,22 +748,20 @@ class AlphaGenome(nn.Module):
                 return self.dtype_policy.cast_output(embeddings)
 
             predictions = self._predict_from_embeddings(embeddings, batch)
-            predictions = self.dtype_policy.cast_output(predictions)
             if mode == "predict":
+                predictions = self.dtype_policy.cast_output(predictions)
                 if return_embeddings:
                     return predictions, self.dtype_policy.cast_output(embeddings)
                 return predictions
             
             metric_tree = self.metric_tree_from_predictions(predictions, batch)
-            return LossOutput(
-                tree=metric_tree,
-                total=metric_tree.total_loss(),
-                predictions=predictions if return_predictions else None,
-                embeddings=(
-                    self.dtype_policy.cast_output(embeddings)
-                    if return_embeddings
-                    else None
-                ),
+            return self.dtype_policy.cast_output(
+                LossOutput(
+                    tree=metric_tree,
+                    total=metric_tree.total_loss(),
+                    predictions=predictions if return_predictions else None,
+                    embeddings=embeddings if return_embeddings else None,
+                )
             )
 
     def embed(

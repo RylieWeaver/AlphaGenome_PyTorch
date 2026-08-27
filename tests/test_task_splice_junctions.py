@@ -106,6 +106,7 @@ def test_splice_junction_loss_tree_combines_loss_components(monkeypatch):
     expected = 0.2 * 2 * (
         components["ratio"] + 0.2 * components["total_count"]
     )
+    expected = model.dtype_policy.cast_output(expected)
     torch.testing.assert_close(
         result.tree.total_loss("splice_sites_junction"),
         expected,
@@ -249,7 +250,7 @@ def test_splice_positions_require_integer_indices(
         predictions = model.predict(batch)
         assert (
             predictions["splice_sites_junction"]["splice_site_positions"].dtype
-            == torch.long
+            == torch.int32
         )
     else:
         with pytest.raises(TypeError, match="integer indices"):

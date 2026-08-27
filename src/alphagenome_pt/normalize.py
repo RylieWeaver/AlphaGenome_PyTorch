@@ -129,7 +129,7 @@ def _normalize_splice_site_positions(
 
     splice_site_positions = splice_site_positions.to(
         device=dna_onehot.device,
-        dtype=torch.long,
+        dtype=torch.int32,
     )
     invalid_position = (
         (splice_site_positions < -1) | (splice_site_positions >= seq_len)

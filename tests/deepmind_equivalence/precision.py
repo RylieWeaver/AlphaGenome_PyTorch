@@ -12,8 +12,8 @@ EQUIVALENCE_TEST_POLICIES = ("deepmind", "float32", "float64")
 # and representation coefficients.
 _PRECISION_COEFFICIENTS = {
     "deepmind": 1e-2,
-    "float32": 1e-5,
-    "float64": 1e-7,
+    "float32": 1e-6,
+    "float64": 1e-8,
 }
 _COMPOSITION_COEFFICIENTS = {
     "module": 1,
@@ -64,22 +64,22 @@ EQUIVALENCE_THRESHOLDS = {
 #     },
 #     "float32": {
 #         "exact": {"relative_L2": 0, "relative_Linf": 0},
-#         "module": {"relative_L2": 1e-5, "relative_Linf": 2e-5},
-#         "architecture": {"relative_L2": 2e-5, "relative_Linf": 4e-5},
+#         "module": {"relative_L2": 1e-6, "relative_Linf": 2e-6},
+#         "architecture": {"relative_L2": 2e-6, "relative_Linf": 4e-6},
 #         "full_model": {
-#             "default": {"relative_L2": 5e-5, "relative_Linf": 1e-4},
-#             "junction": {"relative_L2": 1.25e-4, "relative_Linf": 2.5e-4},
-#             "descaled": {"relative_L2": 1.25e-4, "relative_Linf": 2.5e-4},
+#             "default": {"relative_L2": 5e-6, "relative_Linf": 1e-5},
+#             "junction": {"relative_L2": 1.25e-5, "relative_Linf": 2.5e-5},
+#             "descaled": {"relative_L2": 1.25e-5, "relative_Linf": 2.5e-5},
 #         },
 #     },
 #     "float64": {
 #         "exact": {"relative_L2": 0, "relative_Linf": 0},
-#         "module": {"relative_L2": 1e-7, "relative_Linf": 2e-7},
-#         "architecture": {"relative_L2": 2e-7, "relative_Linf": 4e-7},
+#         "module": {"relative_L2": 1e-8, "relative_Linf": 2e-8},
+#         "architecture": {"relative_L2": 2e-8, "relative_Linf": 4e-8},
 #         "full_model": {
-#             "default": {"relative_L2": 5e-7, "relative_Linf": 1e-6},
-#             "junction": {"relative_L2": 1.25e-6, "relative_Linf": 2.5e-6},
-#             "descaled": {"relative_L2": 1.25e-6, "relative_Linf": 2.5e-6},
+#             "default": {"relative_L2": 5e-8, "relative_Linf": 1e-7},
+#             "junction": {"relative_L2": 1.25e-7, "relative_Linf": 2.5e-7},
+#             "descaled": {"relative_L2": 1.25e-7, "relative_Linf": 2.5e-7},
 #         },
 #     },
 # }
@@ -209,85 +209,79 @@ def jax_dot_algorithm(pt_dtype_policy):
 
 @contextmanager
 def use_jax_compute_uptype_policy(pt_dtype_policy):
-    """Replace fixed JAX AlphaGenome compute uptypes with the policy.
+    """Redirect non-uniform JAX precision choices through the PyTorch policy.
 
-    The reference uses FP32 normalization statistics, head and loss casts,
-    reductions, and preferred element types. It also fixes four attention and
-    two splice-junction einsums to BF16_BF16_F32. This proxy redirects those
-    explicit choices to compute_uptype while leaving ordinary computation and
-    autocasts unchanged.
+    Every explicit ``jnp.float32`` in the four core reference modules maps to
+    ``compute_uptype``. This covers:
 
-    Essentially, this is a way for us to slice into JAX modules for upcasting
-    changes that are needed to comparison with the PyTorch policy.
+    - attention: logits, post-bias casts, preferred contraction outputs, and
+      sequence-to-pair relative positions;
+    - heads: pooling and gene reductions, MultiOrganismLinear preferred output,
+      classification/SSU upcasts, junction RoPE values, and junction losses;
+    - layers: RMSBatchNorm EMA state and statistics plus LayerNorm statistics;
+    - losses: operand casts, reductions, totals, and log-softmax calculations.
 
-    The targeted modules are:
-    - alphagenome_research.model.attention: explicit dot algorithms and outputs
-    - alphagenome_research.model.heads: casts, reductions, and contractions
-    - alphagenome_research.model.layers: LayerNorm and RMSBatchNorm statistics
-    - alphagenome_research.model.losses: casts and reductions
+    The sole explicit ``jnp.float16`` in these modules is the SSU prediction
+    output. It remains FP16 for BF16 compute (preserving the reference's
+    intermediate rounding), but maps to ``compute_dtype`` for FP32/FP64.
+
+    Fixed ``BF16_BF16_F32`` einsum presets are redirected separately because
+    replacing ``jnp.float32`` cannot alter a JAX dot-algorithm enum. Ordinary
+    computation and mixed-precision autocasts remain unchanged.
     """
     import jax
     from alphagenome_research.model import attention, heads, layers, losses
 
     source_algorithm = jax.lax.DotAlgorithmPreset.BF16_BF16_F32
     target_algorithm = jax_dot_algorithm(pt_dtype_policy)
-    source_dtype = jax_dtype(torch.float32)
     target_dtype = jax_dtype(pt_dtype_policy.compute_uptype)
+    target_compute_dtype = jax_dtype(pt_dtype_policy.compute_dtype)
+    target_float16_dtype = (
+        jax_dtype(torch.float16)
+        if pt_dtype_policy.compute_dtype == torch.bfloat16
+        else target_compute_dtype
+    )
 
     class PolicyNumpy:
         def __init__(
             self,
             numpy_module,
             *,
-            replace_float32=False,
-            replace_mean_dtype=False,
+            replace_float16=False,
         ):
             self._numpy_module = numpy_module
-            self._replace_float32 = replace_float32
-            self._replace_mean_dtype = replace_mean_dtype
+            self._replace_float16 = replace_float16
 
         def __getattr__(self, name):
-            if self._replace_float32 and name == "float32":
+            if name == "float32":
                 return target_dtype
+            if self._replace_float16 and name == "float16":
+                return target_float16_dtype
             return getattr(self._numpy_module, name)
 
-        def mean(self, *args, **kwargs):
-            if (
-                self._replace_mean_dtype
-                and kwargs.get("dtype") == source_dtype
-            ):
-                kwargs = {**kwargs, "dtype": target_dtype}
-            return self._numpy_module.mean(*args, **kwargs)
-
         def einsum(self, *args, **kwargs):
-            replacements = {}
             if kwargs.get("precision") == source_algorithm:
-                replacements["precision"] = target_algorithm
-            if kwargs.get("preferred_element_type") == source_dtype:
-                replacements["preferred_element_type"] = target_dtype
-            return self._numpy_module.einsum(
-                *args, **{**kwargs, **replacements}
-            )
+                kwargs = {**kwargs, "precision": target_algorithm}
+            return self._numpy_module.einsum(*args, **kwargs)
 
     module_options = (
-        (attention, False, False),
-        (heads, True, False),
-        (layers, False, True),
-        (losses, True, False),
+        (attention, False),
+        (heads, True),
+        (layers, False),
+        (losses, False),
     )
     original_numpy_modules = tuple(
-        module.jnp for module, _, _ in module_options
+        module.jnp for module, _ in module_options
     )
     try:
-        for module, replace_float32, replace_mean_dtype in module_options:
+        for module, replace_float16 in module_options:
             module.jnp = PolicyNumpy(
                 module.jnp,
-                replace_float32=replace_float32,
-                replace_mean_dtype=replace_mean_dtype,
+                replace_float16=replace_float16,
             )
         yield
     finally:
-        for (module, _, _), original_numpy_module in zip(
+        for (module, _), original_numpy_module in zip(
             module_options, original_numpy_modules
         ):
             module.jnp = original_numpy_module
