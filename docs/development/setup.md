@@ -179,7 +179,8 @@ comparison.
 :::
 
 :::{dropdown} Custom DNA input
-:class: note
+:color: info
+:icon: info
 The option accepts FASTA or plain-text DNA containing at least the requested
 sequence length. One or two paths may be provided and are assigned to organism
 indices `[0, 1]` in that order. If only one path is provided, it is used for

@@ -157,7 +157,8 @@ custom_model = AlphaGenome(
 | `float64` | FP64 | FP64 | FP64 | FP64 | FP64 |
 
 :::{dropdown} Dtype policies
-:class: note
+:color: info
+:icon: info
 The dtype policies balance computational speed/memory and numerical precision.
 `deepmind` is the default and matches the published JAX mixed-precision policy.
 `float64` offers the highest precision but is intended mainly for numerical
@@ -170,7 +171,8 @@ their compute dtypes as they pass between model stages.
 :::
 
 :::{dropdown} What Is Affected by Compute Uptype?
-:class: note
+:color: info
+:icon: info
 The compute uptype is generally used to upcast numerically sensitive operations
 (e.g., normalization statistics, attention and splice-junction contractions,
 softmax, and loss reductions).
