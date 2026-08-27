@@ -8,13 +8,6 @@ generated figures are written under `scipy-proceedings/results`.
 cd scipy-proceedings
 ```
 
-## Data
-
-```bash
-python -m pip install pysam pyBigWig
-python training_curves/download_data.py
-```
-
 ## Parameter counts
 
 ```bash
@@ -38,18 +31,28 @@ python performance/plot.py
 
 ## Training curves
 
+### Data
+
+```bash
+python -m pip install pysam pyBigWig
+python training_curves/download_data.py
+```
+### Training
+
 Run both experiments from scratch and from checkpoint initialization:
 
 ```bash
-python training_curves/train_mlm.py --steps 20
-python training_curves/train_mlm.py --load-state --steps 20
-python training_curves/train_rna_seq.py --steps 20
-python training_curves/train_rna_seq.py --load-state --steps 20
+python training_curves/train_mlm.py
+python training_curves/train_mlm.py --load-state
+python training_curves/train_rna_seq.py
+python training_curves/train_rna_seq.py --load-state
 ```
 
 Model initialization, data shuffling, and MLM masking are seeded for
 reproducibility. GPU execution is not guaranteed to be bitwise deterministic,
 so repeated runs may differ slightly.
+
+### Plotting
 
 Plot training curves after their runs finish:
 
