@@ -39,6 +39,12 @@ uvx twine upload --verbose dist/*
 # password: pypi-...
 uv pip install alphagenome-pt
 
+# Overall.
+rm -rf dist build
+uvx --from build pyproject-build
+uvx twine check dist/*
+uvx twine upload --repository testpypi dist/* --verbose
+
 # Notes:
 Sometimes copying-pasting API token doesn't work... maybe because of copy-paste weirdness.
 It's brute force but as a last resort can just create a new one.

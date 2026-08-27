@@ -57,6 +57,8 @@ jax2pt = [
   "jax",
   "dm-haiku",
 ]
+
+[dependency-groups]
 equivalence = [
   "alphagenome_research @ git+https://github.com/google-deepmind/alphagenome_research.git@1e55dcffb98ba26b31e74edc5e9f038f54c0e89d",
   "protobuf>=7.35.1",

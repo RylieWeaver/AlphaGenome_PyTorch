@@ -63,11 +63,11 @@ From a Python 3.11+ repository checkout, install the equivalence dependencies:
 ```{code-block} bash
 :caption: Install JAX-to-PyTorch equivalence dependencies
 
-python -m pip install -e ".[dev,equivalence]"
+python -m pip install -e ".[dev]" --group equivalence
 ```
 
-The extra installs the public `alphagenome_research` implementation. For GPU tests,
-install the JAX build matching your accelerator.
+The dependency group installs the public `alphagenome_research` implementation.
+For GPU tests, install the JAX build matching your accelerator.
 
 See [DeepMind JAX Equivalence](deepmind-equivalence.md) for the scope and
 [Development Setup](development/setup.md#deepmind-jax-equivalence-tests) for

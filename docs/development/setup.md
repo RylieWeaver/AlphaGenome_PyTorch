@@ -45,11 +45,11 @@ kept separate because JAX adds substantial dependencies.
 ```{code-block} bash
 :caption: Install equivalence-test dependencies
 
-python -m pip install -e ".[dev,equivalence]"
+python -m pip install -e ".[dev]" --group equivalence
 ```
 
 :::{note}
-The equivalence dependency pins `alphagenome_research` to commit
+The equivalence dependency group pins `alphagenome_research` to commit
 `1e55dcffb98ba26b31e74edc5e9f038f54c0e89d`, keeping the reference
 implementation stable as its repository changes.
 :::
