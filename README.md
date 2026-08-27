@@ -9,7 +9,7 @@
   <a href="https://pypi.org/project/alphagenome-pt/"><img alt="Supported Python versions" src="https://img.shields.io/pypi/pyversions/alphagenome-pt"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch 2.0 or newer" src="https://img.shields.io/badge/PyTorch-%3E%3D2.0-EE4C2C?logo=pytorch&logoColor=white"></a>
   <a href="https://huggingface.co/RylieWeaver/alphagenome-pytorch"><img alt="Converted checkpoints on Hugging Face" src="https://img.shields.io/badge/converted%20checkpoints-Hugging%20Face-FFD21E"></a>
-  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <a href="https://github.com/RylieWeaver/AlphaGenome_PyTorch/blob/main/LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
 <p align="center">
