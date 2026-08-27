@@ -116,10 +116,14 @@ def _plot_precision_panel(
             "other",
         )
         linestyle, marker = RESOLUTION_STYLES[resolution]
+        # Exact matches have zero error, which cannot be represented on a log
+        # axis. Omit them while still connecting the positive measurements for
+        # the remaining precision policies.
         row = row.to_numpy()
+        positive = row > 0
         ax.plot(
-            x,
-            row,
+            x[positive],
+            row[positive],
             color=task_colors[task],
             marker=marker,
             linestyle=linestyle,

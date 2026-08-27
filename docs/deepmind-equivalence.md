@@ -260,6 +260,9 @@ We show full-model output equivalence errors across precision policies:
 ::::
 :::::
 
+Exact-zero errors occur only among the per-head losses and are excluded because zero cannot be displayed on a logarithmic axis.
+
+
 
 We show encoder representation equivalence errors across stages 0–7:
 
