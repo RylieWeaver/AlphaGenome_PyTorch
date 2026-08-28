@@ -62,8 +62,8 @@ def main() -> None:
         2 if has_accuracy else 1,
         figsize=(11 if has_accuracy else 6.5, 4.5),
         squeeze=False,
-        constrained_layout=True,
     )
+    figure.subplots_adjust(top=0.84, wspace=0.28)
     loss_axis = axes[0, 0]
     plot_lines(loss_axis, metrics, LOSS_COLUMNS)
     loss_axis.set_title("Loss")
@@ -72,7 +72,7 @@ def main() -> None:
     if has_accuracy:
         accuracy_axis = axes[0, 1]
         plot_lines(accuracy_axis, metrics, ACCURACY_COLUMNS)
-        accuracy_axis.set_title("Masked-base Accuracy")
+        accuracy_axis.set_title("Accuracy")
         accuracy_axis.set_ylabel("Accuracy")
         accuracy_axis.set_ylim(0, 1)
 
@@ -84,7 +84,11 @@ def main() -> None:
 
     task = metadata["task"].replace("_", " ").title()
     initialization = metadata["initialization"].title()
-    figure.suptitle(f"{task} — {initialization} Initialization", fontsize=14)
+    figure.suptitle(
+        f"{task} — {initialization} Initialization",
+        fontsize=14,
+        y=0.97,
+    )
     output = args.result_dir / "training-curves.svg"
     figure.savefig(output, bbox_inches="tight")
     plt.close(figure)
