@@ -1,0 +1,17 @@
+{
+  "task": "rna_seq",
+  "architecture": "published",
+  "initialization": "checkpoint",
+  "dtype_policy": "deepmind",
+  "seed": 42,
+  "fasta": "/home/r9w/Development/Update_AGPT/AlphaGenome_PyTorch/scipy-proceedings/training_curves/downloads/hg38-chr1.fa",
+  "bigwig": "/home/r9w/Development/Update_AGPT/AlphaGenome_PyTorch/scipy-proceedings/training_curves/downloads/ENCFF877MMK.bigWig",
+  "chromosome": "chr1",
+  "sequence_length": 16384,
+  "batch_size": 8,
+  "steps": 1000,
+  "eval_every": 10,
+  "eval_batches": 10,
+  "learning_rate": 3e-05,
+  "track_nonzero_mean": 2.082958403152093
+}
