@@ -6,11 +6,6 @@
 #     alphagenome_pt has model.loss(batch) built in, returning LossOutput
 #   - component names differ: genomicsxai/alphagenome-pytorch's MHABlock is this implementation's MHA, genomicsxai/alphagenome-pytorch's
 #     RMSBatchNorm is this implementation's BatchNorm(rms_norm=True)
-#   - added test_zero_init_starves_scale_params_on_the_first_step, which has no
-#     genomicsxai/alphagenome-pytorch equivalent: alphagenome_pt zero-initialises StandardizedConv1d.weight, so
-#     87 of 363 parameters have no gradient at step 0. That is an init artifact,
-#     not a bug, but the naive port of genomicsxai/alphagenome-pytorch's sweep fails without accounting
-#     for it, so the sweep here takes one optimiser step first.
 #   - sync_bn=False everywhere in the component tests, so they run single-process
 
 import pytest
@@ -24,8 +19,9 @@ from alphagenome_pt.convolutions import (
     UpResBlock,
 )
 from alphagenome_pt.layers import BatchNorm
+from alphagenome_pt.precision import FLOAT32_DTYPE_POLICY, dtype_policy_context
 
-from ._helpers import ALL_HEADS, HEADS_WITHOUT_JUNCTION, build_with_batch
+from .helpers import ALL_HEADS, build_with_batch
 
 pytestmark = pytest.mark.integration
 
@@ -34,7 +30,7 @@ def _healthy(param, name):
     assert param.grad is not None, f"{name}: no gradient"
     assert torch.isfinite(param.grad).all(), f"{name}: non-finite gradient"
     norm = param.grad.norm().item()
-    # A gradient of 1e-30 is dead in practice even though it technically exists.
+    # Treat gradients at or below 1e-12 as vanished in practice.
     assert norm > 1e-12, f"{name}: gradient vanished ({norm})"
     assert norm < 1e8, f"{name}: gradient exploded ({norm})"
 
@@ -43,17 +39,8 @@ class TestFullModelBackward:
     def test_every_parameter_receives_a_gradient(self):
         # The most valuable test in the tier. A parameter with no gradient never
         # trains: it sits at its random init for the whole run and nothing says so.
-        # One optimiser step is taken first because alphagenome_pt zero-initialises the
-        # standardized convs, which starves their scale params at step 0 only.
-        model, batch = build_with_batch(HEADS_WITHOUT_JUNCTION)
+        model, batch = build_with_batch(ALL_HEADS)
         model.train()
-        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
-
-        opt.zero_grad()
-        model.loss(batch).total.backward()
-        opt.step()
-
-        opt.zero_grad()
         model.loss(batch).total.backward()
 
         dead = [n for n, p in model.named_parameters()
@@ -91,52 +78,7 @@ class TestFullModelBackward:
         output.total.backward()
 
 
-class TestZeroInitialisation:
-    def test_standardized_conv_weights_start_at_zero(self):
-        # Documents why the sweep above needs a warm-up step.
-        conv = StandardizedConv1d(8, 16, kernel_size=5)
-        assert bool((conv.weight == 0).all())
-
-    def test_zero_init_starves_scale_params_on_the_first_step(self):
-        # With w == 0, weight standardization gives a zero kernel whatever the
-        # scale is, so d(loss)/d(scale) == 0 at step 0. The weights themselves do
-        # get a gradient, so this clears after one step. Pinned so that a change
-        # in the init scheme is noticed.
-        model, batch = build_with_batch(HEADS_WITHOUT_JUNCTION)
-        model.train()
-        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
-
-        model.loss(batch).total.backward()
-        dead_before = sum(1 for p in model.parameters()
-                          if p.grad is None or p.grad.norm() == 0)
-        opt.step()
-
-        opt.zero_grad()
-        model.loss(batch).total.backward()
-        dead_after = sum(1 for p in model.parameters()
-                         if p.grad is None or p.grad.norm() == 0)
-
-        assert dead_before > 0, "expected starved scale params at init"
-        assert dead_after == 0, f"{dead_after} params still dead after one step"
-
-
-class TestJunctionHeadGradients:
-    def test_junction_head_is_starved_by_an_untrained_classifier(self):
-        # Not a bug. The junction head only predicts at positions the
-        # classification head flags as splice sites, and an untrained classifier
-        # flags none, so every position is masked out. genomicsxai/alphagenome-pytorch excludes this head
-        # from its sweep for the same reason.
-        model, batch = build_with_batch(ALL_HEADS)
-        model.train()
-        model.loss(batch).total.backward()
-
-        junction = [(n, p) for n, p in model.named_parameters()
-                    if n.startswith("_heads.splice_sites_junction.")]
-        assert junction
-        starved = [n for n, p in junction
-                   if p.grad is None or p.grad.norm() == 0]
-        assert starved, "junction head unexpectedly received gradients"
-
+class TestJunctionHead:
     def test_junction_head_runs_and_produces_a_finite_loss(self):
         model, batch = build_with_batch(ALL_HEADS)
         output = model.loss(batch, return_predictions=True)
@@ -146,9 +88,13 @@ class TestJunctionHeadGradients:
 
 
 class TestComponentGradients:
+    @pytest.fixture(autouse=True)
+    def _float32_policy(self):
+        with dtype_policy_context(FLOAT32_DTYPE_POLICY, "cpu"):
+            yield
+
     def test_standardized_conv1d(self):
         conv = StandardizedConv1d(16, 32, kernel_size=5)
-        torch.nn.init.normal_(conv.weight, std=0.1)   # zero init would starve scale
         x = torch.randn(2, 16, 64, requires_grad=True)
         conv(x).pow(2).mean().backward()
         assert x.grad is not None and torch.isfinite(x.grad).all()
@@ -157,7 +103,6 @@ class TestComponentGradients:
 
     def test_conv_block(self):
         block = ConvBlock(16, 32, sync_bn=False)
-        torch.nn.init.normal_(block.conv.weight, std=0.1)
         x = torch.randn(2, 16, 64, requires_grad=True)
         block(x).pow(2).mean().backward()
         assert x.grad is not None and torch.isfinite(x.grad).all()

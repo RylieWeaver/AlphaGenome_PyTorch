@@ -32,7 +32,8 @@ class TestApplyRope:
     def test_does_not_mutate_input(self):
         x = _x()
         before = x.clone()
-        apply_rope(x, positions=None, max_position=S)
+        out = apply_rope(x, positions=None, max_position=S)
+        assert out is not x
         torch.testing.assert_close(x, before)
 
     def test_values_actually_change(self):
@@ -41,7 +42,9 @@ class TestApplyRope:
         out = apply_rope(x, positions=None, max_position=S)
         assert not torch.allclose(out, x)
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    @pytest.mark.parametrize(
+        "dtype", [torch.bfloat16, torch.float32, torch.float64]
+    )
     def test_dtype_preserved(self, dtype):
         x = _x().to(dtype)
         assert apply_rope(x, positions=None, max_position=S).dtype == dtype
@@ -67,6 +70,7 @@ class TestRopeIsTranslationInvariant:
 
     def test_relative_geometry_survives_a_shift(self):
         x = _x()
+        # Keep the frequency basis fixed; only shift the encoded positions.
         out_a = apply_rope(x.clone(), positions=torch.arange(S).unsqueeze(0),
                            max_position=S * 8)
         out_b = apply_rope(x.clone(),
@@ -78,6 +82,7 @@ class TestRopeIsTranslationInvariant:
 
         # But adjacent pairs have the same offset in both, so their inner
         # products must match.
+        # [B, S - 1, H, C] -> sum over channels -> [B, S - 1, H]
         dots_a = (out_a[:, :-1] * out_a[:, 1:]).sum(dim=-1)
         dots_b = (out_b[:, :-1] * out_b[:, 1:]).sum(dim=-1)
         torch.testing.assert_close(dots_a, dots_b, rtol=1e-4, atol=1e-4)

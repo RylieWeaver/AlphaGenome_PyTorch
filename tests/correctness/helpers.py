@@ -10,14 +10,6 @@ from alphagenome_pt import (
 
 ALL_HEADS = tuple(HeadName)
 
-# The junction head is the one head that legitimately receives no gradient from a
-# randomly initialised model: it only predicts at positions the classification
-# head flags as splice sites, and an untrained classifier flags none. genomicsxai/alphagenome-pytorch
-# excludes it from its gradient sweep for the same reason.
-HEADS_WITHOUT_JUNCTION = tuple(
-    h for h in HeadName if h is not HeadName.SPLICE_SITES_JUNCTION
-)
-
 
 def build(heads=ALL_HEADS, **cfg):
     metadata = synthetic_metadata(heads)

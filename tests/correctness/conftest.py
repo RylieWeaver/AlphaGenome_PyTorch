@@ -1,6 +1,5 @@
-# Pytest configuration for this package. Not adapted from any upstream source.
-# conftest.py re-exports everything here; pytest only discovers hooks and
-# fixtures from a file literally named conftest.py, so that shim has to stay.
+# Pytest configuration for the correctness tests. Not adapted from an
+# upstream source.
 
 import pytest
 import torch
@@ -8,7 +7,9 @@ import torch
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "unit: fast, no model construction")
-    config.addinivalue_line("markers", "integration: builds a small model")
+    config.addinivalue_line(
+        "markers", "integration: builds a small model"
+    )
 
 
 def pytest_addoption(parser):
@@ -18,8 +19,10 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def tolerances(pytestconfig):
-    return {"atol": pytestconfig.getoption("--atol"),
-            "rtol": pytestconfig.getoption("--rtol")}
+    return {
+        "atol": pytestconfig.getoption("--atol"),
+        "rtol": pytestconfig.getoption("--rtol"),
+    }
 
 
 # A model is built per test because metadata varies by head, so there is no

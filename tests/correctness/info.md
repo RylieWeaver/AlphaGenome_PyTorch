@@ -1,4 +1,4 @@
-# tests/set1 — correctness tests
+# tests/correctness — correctness tests
 
 ## Purpose
 
@@ -7,7 +7,7 @@ The tests already in `tests/` are baseline tests: they help verify that a forwar
 This package adds 81 tests that check correctness rather than liveness. It runs in roughly 10–25 seconds on CPU and requires no GPU, no JAX, no network access, and no checkpoint download, so it is suitable for running on every commit.
 
 ```bash
-pytest tests/set1 -q
+pytest tests/correctness -q
 ```
 
 ## Sources
@@ -25,9 +25,8 @@ That suite contains 54 test files. Seven were adapted here. The remaining 47 exe
 | `test_backward.py` | `tests/integration/test_backward.py` |
 | `test_checkpoint_roundtrip.py` | `tests/integration/test_checkpoint_roundtrip.py` |
 | `test_determinism.py` | `tests/integration/test_determinism.py` |
-| `conftest.py` | no upstream source (a shim; the real configuration is in `_config.py`) |
-| `_config.py` | no upstream source |
-| `_helpers.py` | no upstream source |
+| `conftest.py` | no upstream source |
+| `helpers.py` | no upstream source |
 
 ## Golden values
 
@@ -57,22 +56,6 @@ Both branches are pinned so that neither can drift.
 
 To remove the intermediate dependency entirely, install `alphagenome_research` in a disposable environment, run the reference losses on the same inputs, and regenerate the constants directly. The values are identical; the provenance is shorter.
 
-## Behaviour discovered while writing these tests
-
-The following were surfaced by the tests on their first run. Each is currently undocumented, and each is now pinned so that a change in behaviour is noticed rather than silently absorbed.
-
-**1. Some buffers are absent from `state_dict()`.**
-
-`_track_means` and `_track_mask` are registered non-persistent. The model therefore cannot be restored from a checkpoint alone; it also requires the exact metadata it was constructed with. This appears intentional — metadata is the source of truth, and `checkpoint.py` retrieves state and metadata separately — but it is an undocumented coupling. Pinned in `test_checkpoint_roundtrip.py::test_track_means_are_not_in_the_checkpoint`. If these buffers are ever made persistent, that test should be removed.
-
-**2. `StandardizedConv1d.weight` is zero-initialised.**
-
-Weight standardization computes `scale * (w - mean) / std`. With `w == 0` the resulting kernel is zero regardless of `scale`, so `d(loss)/d(scale) == 0` on the first backward pass: 87 of 363 parameters receive no gradient at step 0. The weights themselves do receive gradients, so this resolves after a single optimiser step (87 falls to 6). This is an initialisation artefact rather than a defect, but a direct port of the upstream gradient sweep fails without accounting for it, so the sweep here performs one warm-up step first. Pinned in `test_backward.py::TestZeroInitialisation`.
-
-**3. The six parameters that remain without gradients belong to the splice junction head.**
-
-Specifically the positive and negative donor and acceptor logit embeddings, and `multiorg_linear.weight` and `multiorg_linear.bias`. This is expected. The junction head only predicts at positions the classification head identifies as splice sites, and an untrained classifier identifies none, so every position is masked out. The upstream suite excludes this head from its own gradient sweep for the same reason, which its docstring states explicitly. Pinned in `test_backward.py::TestJunctionHeadGradients`.
-
 ## File summary
 
 ### `test_losses.py` — 30 tests, no model
@@ -87,7 +70,7 @@ Golden values pin the numerics against the JAX reference. The property tests cov
 
 Rotary embeddings must be translation-invariant: shifting all positions by a constant changes the raw outputs, but must leave the inner products between equally-offset pairs unchanged. This is the defining property of RoPE. An implementation with sin and cos transposed passes every shape check and fails this immediately.
 
-### `test_backward.py` — 13 tests, small model
+### `test_backward.py` — 10 tests, small model
 
 Every parameter must receive a gradient. A parameter without one never trains: it remains at its initialisation for the entire run and nothing reports it. Also includes per-component gradient health with a `(1e-12, 1e8)` norm band, so a layer whose gradient is `1e-30` is caught even though it technically has one.
 
