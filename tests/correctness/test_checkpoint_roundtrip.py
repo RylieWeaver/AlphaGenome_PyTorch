@@ -14,7 +14,7 @@
 import pytest
 import torch
 
-from ._helpers import build, build_with_batch
+from .helpers import build, build_with_batch
 
 pytestmark = pytest.mark.integration
 

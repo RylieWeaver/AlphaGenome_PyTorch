@@ -13,7 +13,7 @@ import torch
 
 from alphagenome_pt import HeadName, small_alphagenome, synthetic_batch, synthetic_metadata
 
-from ._helpers import ALL_HEADS, build_with_batch
+from .helpers import ALL_HEADS, build_with_batch
 
 pytestmark = pytest.mark.integration
 
