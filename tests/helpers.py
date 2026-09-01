@@ -2,10 +2,35 @@
 import torch
 
 # Internal
-from alphagenome_pt import MetricTree
+from alphagenome_pt import (
+    HeadName,
+    MetricTree,
+    small_alphagenome,
+    synthetic_batch,
+    synthetic_metadata,
+)
 
 
 DNA_SEQUENCE = "ACGT" * 512
+ALL_HEADS = tuple(HeadName)
+
+
+def build_small_model(heads=ALL_HEADS, **cfg):
+    """Build a small model and its matching synthetic metadata."""
+    metadata = synthetic_metadata(heads)
+    return small_alphagenome(metadata, **cfg), metadata
+
+
+def build_small_model_with_batch(heads=ALL_HEADS, batch_size=2, **cfg):
+    """Build a small model and a shape-compatible synthetic batch."""
+    model, metadata = build_small_model(heads, **cfg)
+    batch = synthetic_batch(
+        metadata,
+        batch_size=batch_size,
+        seq_len=model.max_seq_len,
+        num_splice_sites=model.num_splice_sites,
+    )
+    return model, batch
 
 
 def assert_predictions_close(
