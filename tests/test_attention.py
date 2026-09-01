@@ -13,8 +13,6 @@ import torch
 
 from alphagenome_pt.attention import apply_rope
 
-pytestmark = pytest.mark.unit
-
 B, S, H, C = 1, 16, 2, 64
 
 

@@ -1,3 +1,8 @@
+# State-dict contract coverage in this file is adapted from
+# genomicsxai/alphagenome-pytorch,
+# tests/integration/test_checkpoint_roundtrip.py (Apache-2.0). Existing
+# configuration and model save/load tests are original work.
+
 # External
 import pytest
 import torch
@@ -11,7 +16,13 @@ from alphagenome_pt import (
     synthetic_metadata,
     small_alphagenome,
 )
-from .helpers import DNA_SEQUENCE, assert_finite_metric_tree, assert_predictions_close
+from .helpers import (
+    DNA_SEQUENCE,
+    assert_finite_metric_tree,
+    assert_predictions_close,
+    build_small_model,
+    build_small_model_with_batch,
+)
 
 
 @pytest.mark.parametrize(
@@ -220,3 +231,112 @@ def test_model_save_load_roundtrip(tmp_path):
         expected = model.predict(DNA_SEQUENCE)
         actual = loaded_model.predict(DNA_SEQUENCE)
     assert_predictions_close(actual, expected)
+
+
+class TestStateDictContracts:
+    @pytest.fixture(autouse=True)
+    def _seed(self):
+        torch.manual_seed(0)
+
+    def test_state_dict_reload_preserves_parameters_and_buffers(self, tmp_path):
+        torch.manual_seed(42)
+        source, _ = build_small_model()
+        torch.manual_seed(999)
+        target, _ = build_small_model()
+
+        path = tmp_path / "model.pt"
+        torch.save(source.state_dict(), path)
+        target.load_state_dict(torch.load(path, weights_only=True))
+
+        for (name, expected), (_, actual) in zip(
+            source.named_parameters(), target.named_parameters()
+        ):
+            torch.testing.assert_close(
+                actual, expected, atol=0, rtol=0, msg=f"parameter {name}"
+            )
+
+        persistent = set(source.state_dict())
+        source_buffers = dict(source.named_buffers())
+        for name, actual in target.named_buffers():
+            if name in persistent:
+                torch.testing.assert_close(
+                    actual,
+                    source_buffers[name],
+                    atol=0,
+                    rtol=0,
+                    msg=f"buffer {name}",
+                )
+
+    def test_embeddings_are_identical_after_state_dict_reload(self, tmp_path):
+        torch.manual_seed(42)
+        source, batch = build_small_model_with_batch()
+        source.eval()
+        with torch.no_grad():
+            before = source.embed(batch)
+
+        path = tmp_path / "model.pt"
+        torch.save(source.state_dict(), path)
+
+        torch.manual_seed(999)
+        target, _ = build_small_model()
+        target.load_state_dict(torch.load(path, weights_only=True))
+        target.eval()
+        with torch.no_grad():
+            after = target.embed(batch)
+
+        for name in ("embeddings_1bp", "embeddings_128bp", "embeddings_pair"):
+            torch.testing.assert_close(
+                getattr(after, name), getattr(before, name), atol=0, rtol=0
+            )
+
+    def test_trunk_loads_when_head_keys_are_missing(self):
+        torch.manual_seed(42)
+        source, _ = build_small_model()
+        trunk = {
+            key: value
+            for key, value in source.state_dict().items()
+            if not key.startswith("_heads.")
+        }
+
+        torch.manual_seed(999)
+        target, _ = build_small_model()
+        missing, unexpected = target.load_state_dict(trunk, strict=False)
+
+        assert all(key.startswith("_heads.") for key in missing)
+        assert not unexpected
+        source_parameters = dict(source.named_parameters())
+        for name, parameter in target.named_parameters():
+            if not name.startswith("_heads."):
+                torch.testing.assert_close(
+                    parameter,
+                    source_parameters[name],
+                    atol=0,
+                    rtol=0,
+                    msg=f"trunk parameter {name}",
+                )
+
+    def test_expected_state_dict_prefixes_are_present(self):
+        model, _ = build_small_model()
+        keys = set(model.state_dict())
+        for prefix in (
+            "sequence_encoder.",
+            "transformer_tower.",
+            "sequence_decoder.",
+            "_heads.",
+        ):
+            assert any(key.startswith(prefix) for key in keys), prefix
+
+    def test_metadata_buffers_are_not_in_state_dict(self):
+        model, _ = build_small_model()
+        persistent = set(model.state_dict())
+        non_persistent = [
+            name
+            for name, _ in model.named_buffers()
+            if name not in persistent
+        ]
+        assert non_persistent
+        assert all(
+            name.rsplit(".", 1)[1]
+            in ("_track_means", "_track_mask", "_tissue_mask")
+            for name in non_persistent
+        ), non_persistent

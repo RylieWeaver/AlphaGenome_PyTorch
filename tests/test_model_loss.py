@@ -1,3 +1,7 @@
+# Full-model backward coverage in this file is adapted from
+# genomicsxai/alphagenome-pytorch, tests/integration/test_backward.py
+# (Apache-2.0). The existing loss-contract tests are original work.
+
 # External
 import pytest
 import torch
@@ -9,7 +13,7 @@ from alphagenome_pt import (
     synthetic_mlm,
 )
 
-from .helpers import DNA_SEQUENCE
+from .helpers import ALL_HEADS, DNA_SEQUENCE, build_small_model_with_batch
 
 
 
@@ -107,3 +111,57 @@ def test_metric_tree_from_predictions_requires_predictions_and_targets_for_enabl
     batch.mlm = None
     with pytest.raises(ValueError, match="target not in batch"):
         model.metric_tree_from_predictions(predictions, batch)
+
+
+class TestFullModelBackward:
+    @pytest.fixture(autouse=True)
+    def _seed(self):
+        torch.manual_seed(0)
+
+    def test_every_parameter_receives_a_gradient(self):
+        model, batch = build_small_model_with_batch(ALL_HEADS)
+        model.train()
+        model.loss(batch).total.backward()
+
+        missing = [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.grad is None or parameter.grad.norm() == 0
+        ]
+        assert not missing, (
+            f"{len(missing)} parameters received no gradient:\n"
+            + "\n".join(missing[:20])
+        )
+
+    def test_no_nan_or_inf_in_any_gradient(self):
+        model, batch = build_small_model_with_batch(ALL_HEADS)
+        model.train()
+        model.loss(batch).total.backward()
+        invalid = [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+            and not torch.isfinite(parameter.grad).all()
+        ]
+        assert not invalid, invalid
+
+    def test_optimizer_step_changes_the_weights(self):
+        model, batch = build_small_model_with_batch(ALL_HEADS)
+        model.train()
+        before = [parameter.detach().clone() for parameter in model.parameters()]
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        model.loss(batch).total.backward()
+        optimizer.step()
+        assert any(
+            not torch.equal(old, new)
+            for old, new in zip(before, model.parameters())
+        )
+
+    def test_all_heads_can_be_trained_together(self):
+        model, batch = build_small_model_with_batch(ALL_HEADS)
+        model.train()
+        output = model.loss(batch, return_predictions=True)
+        assert torch.isfinite(output.total)
+        assert output.predictions is not None
+        assert len(output.predictions) == len(ALL_HEADS)
+        output.total.backward()

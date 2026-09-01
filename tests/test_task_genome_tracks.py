@@ -1,3 +1,7 @@
+# Track-scaling tests are adapted from genomicsxai/alphagenome-pytorch,
+# tests/unit/test_heads.py (Apache-2.0), specifically TestScalingFunctions and
+# TestPredictionsScaling. Task-level tests in this file are original work.
+
 # External
 from importlib import metadata
 
@@ -12,6 +16,7 @@ from alphagenome_pt import (
     synthetic_metadata,
     small_alphagenome,
 )
+from alphagenome_pt.heads import predictions_scaling, targets_scaling
 from .helpers import assert_finite_metric_tree
 
 
@@ -149,3 +154,79 @@ def test_min_zero_multinomial_loss_config_reaches_genome_track_head():
     model = small_alphagenome(metadata, min_zero_multinomial_loss=False)
 
     assert model._heads["rna_seq"]._min_zero_multinomial_loss is False
+
+
+def _scaling_input(batch=2, seq=1024, tracks=8):
+    return torch.randn(batch, seq, tracks).abs() * 50
+
+
+class TestTrackScalingIsInvertible:
+    @pytest.fixture(autouse=True)
+    def _seed(self):
+        torch.manual_seed(0)
+
+    @pytest.mark.parametrize("apply_squashing", [True, False])
+    def test_targets_then_predictions_is_identity(self, apply_squashing):
+        x = _scaling_input()
+        means = torch.ones(2, 8)
+        scaled = targets_scaling(x, means, 128, apply_squashing)
+        back = predictions_scaling(scaled, means, 128, apply_squashing)
+        torch.testing.assert_close(back, x, rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.parametrize("apply_squashing", [True, False])
+    def test_predictions_then_targets_is_identity(self, apply_squashing):
+        x = _scaling_input()
+        means = torch.ones(2, 8)
+        unscaled = predictions_scaling(x, means, 128, apply_squashing)
+        back = targets_scaling(unscaled, means, 128, apply_squashing)
+        torch.testing.assert_close(back, x, rtol=1e-4, atol=1e-4)
+
+    def test_identity_with_nonuniform_track_means(self):
+        x = _scaling_input()
+        means = torch.rand(2, 8) * 9 + 1
+        scaled = targets_scaling(x, means, 128, True)
+        back = predictions_scaling(scaled, means, 128, True)
+        torch.testing.assert_close(back, x, rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.parametrize("resolution", [1, 128])
+    def test_identity_across_resolutions(self, resolution):
+        x = _scaling_input()
+        means = torch.ones(2, 8)
+        scaled = targets_scaling(x, means, resolution, False)
+        back = predictions_scaling(scaled, means, resolution, False)
+        torch.testing.assert_close(back, x, rtol=1e-4, atol=1e-4)
+
+
+class TestTrackScalingBehaviour:
+    @pytest.fixture(autouse=True)
+    def _seed(self):
+        torch.manual_seed(0)
+
+    def test_below_soft_clip_is_linear_in_resolution(self):
+        x = torch.full((1, 4, 1), 0.5)
+        means = torch.ones(1, 1)
+        out = targets_scaling(x, means, 2, False)
+        torch.testing.assert_close(out, x / 2, rtol=1e-6, atol=1e-6)
+
+    def test_soft_clip_compresses_large_values(self):
+        means = torch.ones(1, 1)
+        small = targets_scaling(torch.full((1, 1, 1), 10.0), means, 1, False)
+        large = targets_scaling(
+            torch.full((1, 1, 1), 1000.0), means, 1, False
+        )
+        assert large.item() < 1000.0
+        assert large.item() > small.item()
+        assert (large / small).item() < 100.0
+
+    def test_squashing_changes_the_result(self):
+        x = _scaling_input()
+        means = torch.ones(2, 8)
+        assert not torch.allclose(
+            targets_scaling(x, means, 128, False),
+            targets_scaling(x, means, 128, True),
+        )
+
+    def test_gradient_flows_through_scaling(self):
+        x = _scaling_input().requires_grad_(True)
+        targets_scaling(x, torch.ones(2, 8), 128, True).sum().backward()
+        assert x.grad is not None and torch.isfinite(x.grad).all()

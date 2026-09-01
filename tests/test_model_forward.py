@@ -1,3 +1,7 @@
+# Determinism coverage in this file is adapted from
+# genomicsxai/alphagenome-pytorch, tests/integration/test_determinism.py
+# (Apache-2.0). The existing forward-contract tests are original work.
+
 # External
 from unittest import mock
 import pytest
@@ -7,7 +11,11 @@ import torch
 from alphagenome_pt import DataBatch, HeadName
 from alphagenome_pt.embeddings import Embeddings
 
-from .helpers import DNA_SEQUENCE, assert_predictions_close
+from .helpers import (
+    DNA_SEQUENCE,
+    assert_predictions_close,
+    build_small_model_with_batch,
+)
 
 
 
@@ -213,3 +221,73 @@ def test_predict_preserves_training_states_and_disables_grad(model):
         # Changing back
         for module, training in original_states:
             module.training = training
+
+
+def _embedding_tensors(model, batch):
+    with torch.no_grad():
+        embeddings = model.embed(batch)
+    return (
+        embeddings.embeddings_1bp,
+        embeddings.embeddings_128bp,
+        embeddings.embeddings_pair,
+    )
+
+
+def _assert_embeddings_identical(actual, expected, message):
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(
+            actual_tensor,
+            expected_tensor,
+            atol=0,
+            rtol=0,
+            msg=message,
+        )
+
+
+class TestModelDeterminism:
+    @pytest.fixture(autouse=True)
+    def _seed(self):
+        torch.manual_seed(0)
+
+    def test_eval_mode_is_bitwise_reproducible(self):
+        model, batch = build_small_model_with_batch()
+        model.eval()
+        _assert_embeddings_identical(
+            _embedding_tensors(model, batch),
+            _embedding_tensors(model, batch),
+            "same input twice gave different outputs",
+        )
+
+    def test_same_seed_gives_same_model(self):
+        torch.manual_seed(123)
+        model_a, batch = build_small_model_with_batch()
+        torch.manual_seed(123)
+        model_b, _ = build_small_model_with_batch()
+        model_a.eval()
+        model_b.eval()
+        _assert_embeddings_identical(
+            _embedding_tensors(model_a, batch),
+            _embedding_tensors(model_b, batch),
+            "same seed gave different models",
+        )
+
+    def test_different_seed_gives_different_model(self):
+        torch.manual_seed(1)
+        model_a, batch = build_small_model_with_batch()
+        torch.manual_seed(2)
+        model_b, _ = build_small_model_with_batch()
+        model_a.eval()
+        model_b.eval()
+        assert not torch.allclose(
+            _embedding_tensors(model_a, batch)[0],
+            _embedding_tensors(model_b, batch)[0],
+        )
+
+    def test_different_input_gives_different_output(self):
+        model, batch_a = build_small_model_with_batch()
+        _, batch_b = build_small_model_with_batch(batch_size=2)
+        model.eval()
+        assert not torch.allclose(
+            _embedding_tensors(model, batch_a)[0],
+            _embedding_tensors(model, batch_b)[0],
+        )

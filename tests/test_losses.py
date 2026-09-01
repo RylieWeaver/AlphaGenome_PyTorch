@@ -1,7 +1,7 @@
 # Adapted from genomicsxai/alphagenome-pytorch, tests/unit/test_losses.py (Apache-2.0).
 # The golden values originate from the reference JAX implementation
 # (google-deepmind/alphagenome); that suite recorded them, and each one was
-# re-verified against alphagenome_pt.losses before being pinned here. See info.md.
+# re-verified against alphagenome_pt.losses before being pinned here.
 #
 # Deviations from the source file:
 #   - dropped TestCountWeight; multinomial_loss here has no count_weight argument
@@ -14,9 +14,6 @@ import pytest
 import torch
 
 from alphagenome_pt import losses
-
-pytestmark = pytest.mark.unit
-
 
 class TestSafeMaskedMean:
     def test_no_mask(self):
