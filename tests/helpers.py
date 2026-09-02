@@ -15,6 +15,28 @@ DNA_SEQUENCE = "ACGT" * 512
 ALL_HEADS = tuple(HeadName)
 
 
+def seeded_randn(
+    shape: tuple[int, ...] = (1, 16, 2, 64),
+    seed: int = 42,
+) -> torch.Tensor:
+    """Return a reproducible normally distributed tensor."""
+    torch.manual_seed(seed)
+    return torch.randn(shape)
+
+
+def assert_healthy_gradient(
+    tensor: torch.Tensor,
+    name: str,
+) -> None:
+    """Assert that a tensor received a finite, non-vanishing gradient."""
+    assert tensor.grad is not None, f"{name}: no gradient"
+    assert torch.isfinite(tensor.grad).all(), f"{name}: non-finite gradient"
+    norm = tensor.grad.norm().item()
+    # Treat gradients at or below 1e-12 as vanished in practice.
+    assert norm > 1e-12, f"{name}: gradient vanished ({norm})"
+    assert norm < 1e8, f"{name}: gradient exploded ({norm})"
+
+
 def build_small_model(heads=ALL_HEADS, **cfg):
     """Build a small model and its matching synthetic metadata."""
     metadata = synthetic_metadata(heads)

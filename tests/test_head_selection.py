@@ -27,8 +27,8 @@ class TestHeadSelection:
     def test_enabled_flag_skips_disabled_heads(self):
         metadata = synthetic_metadata((HeadName.RNA_SEQ, HeadName.ATAC))
         heads = metadata.metadata["heads"]
-        heads["rna_seq"]["enabled"] = False
-        heads["atac"]["enabled"] = True
+        heads[HeadName.RNA_SEQ.value]["enabled"] = False
+        heads[HeadName.ATAC.value]["enabled"] = True
         model = small_alphagenome(metadata)
 
         batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
@@ -37,9 +37,9 @@ class TestHeadSelection:
         assert result.predictions is not None
         assert torch.isfinite(result.total)
         assert_finite_metric_tree(result.tree)
-        assert "atac" in result.predictions
-        assert "rna_seq" not in result.predictions
-        assert set(result.tree.head_loss_totals()) == {"atac"}
+        assert HeadName.ATAC.value in result.predictions
+        assert HeadName.RNA_SEQ.value not in result.predictions
+        assert set(result.tree.head_loss_totals()) == {HeadName.ATAC.value}
 
     def test_only_requested_heads_are_built(self):
         metadata = synthetic_metadata((HeadName.ATAC, HeadName.DNASE))
@@ -47,11 +47,11 @@ class TestHeadSelection:
         batch = synthetic_batch(metadata, seq_len=model.max_seq_len)
         predictions = model(batch)
 
-        assert "atac" in predictions
-        assert "dnase" in predictions
+        assert HeadName.ATAC.value in predictions
+        assert HeadName.DNASE.value in predictions
         # Anything not asked for must be absent, not silently computed.
-        assert "cage" not in predictions
-        assert "rna_seq" not in predictions
+        assert HeadName.CAGE.value not in predictions
+        assert HeadName.RNA_SEQ.value not in predictions
 
     def test_single_head_model_has_one_head(self):
         metadata = synthetic_metadata((HeadName.ATAC,))
@@ -59,7 +59,7 @@ class TestHeadSelection:
         predictions = model(
             synthetic_batch(metadata, seq_len=model.max_seq_len)
         )
-        assert list(predictions) == ["atac"]
+        assert list(predictions) == [HeadName.ATAC.value]
 
     def test_all_heads_can_be_requested(self):
         model, batch = build_small_model_with_batch(ALL_HEADS)
