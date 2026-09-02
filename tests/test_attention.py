@@ -13,22 +13,19 @@ import torch
 
 from alphagenome_pt.attention import apply_rope
 
+from .helpers import assert_healthy_gradient, seeded_randn
+
 B, S, H, C = 1, 16, 2, 64
-
-
-def _x(seed=42):
-    torch.manual_seed(seed)
-    return torch.randn(B, S, H, C)
 
 
 class TestApplyRope:
     def test_output_shape_is_unchanged(self):
-        x = _x()
+        x = seeded_randn()
         out = apply_rope(x, positions=None, max_position=S)
         assert out.shape == x.shape
 
     def test_does_not_mutate_input(self):
-        x = _x()
+        x = seeded_randn()
         before = x.clone()
         out = apply_rope(x, positions=None, max_position=S)
         assert out is not x
@@ -36,7 +33,7 @@ class TestApplyRope:
 
     def test_values_actually_change(self):
         # A no-op rope would pass every shape check.
-        x = _x()
+        x = seeded_randn()
         out = apply_rope(x, positions=None, max_position=S)
         assert not torch.allclose(out, x)
 
@@ -44,18 +41,18 @@ class TestApplyRope:
         "dtype", [torch.bfloat16, torch.float32, torch.float64]
     )
     def test_dtype_preserved(self, dtype):
-        x = _x().to(dtype)
+        x = seeded_randn().to(dtype)
         assert apply_rope(x, positions=None, max_position=S).dtype == dtype
 
     def test_explicit_positions_match_default(self):
-        x = _x()
+        x = seeded_randn()
         default = apply_rope(x, positions=None, max_position=S)
         explicit = apply_rope(x, positions=torch.arange(S).unsqueeze(0),
                               max_position=S)
         torch.testing.assert_close(default, explicit)
 
     def test_different_max_position_gives_different_result(self):
-        x = _x()
+        x = seeded_randn()
         a = apply_rope(x, positions=None, max_position=S)
         b = apply_rope(x, positions=None, max_position=S * 8)
         assert not torch.allclose(a, b)
@@ -67,7 +64,7 @@ class TestRopeIsTranslationInvariant:
     # sin and cos swapped passes every shape check and fails this instantly.
 
     def test_relative_geometry_survives_a_shift(self):
-        x = _x()
+        x = seeded_randn()
         # Keep the frequency basis fixed; only shift the encoded positions.
         out_a = apply_rope(x.clone(), positions=torch.arange(S).unsqueeze(0),
                            max_position=S * 8)
@@ -87,7 +84,7 @@ class TestRopeIsTranslationInvariant:
 
     def test_norm_is_preserved(self):
         # Rope is a rotation, so it must not change vector length.
-        x = _x()
+        x = seeded_randn()
         out = apply_rope(x, positions=None, max_position=S)
         torch.testing.assert_close(x.norm(dim=-1), out.norm(dim=-1),
                                    rtol=1e-5, atol=1e-5)
@@ -95,13 +92,13 @@ class TestRopeIsTranslationInvariant:
 
 class TestRopeGradients:
     def test_gradient_flows(self):
-        x = _x().requires_grad_(True)
+        x = seeded_randn().requires_grad_(True)
         apply_rope(x, positions=None, max_position=S).sum().backward()
         assert x.grad is not None
         assert torch.isfinite(x.grad).all()
         assert x.grad.shape == x.shape
 
     def test_gradient_is_nonzero(self):
-        x = _x().requires_grad_(True)
+        x = seeded_randn().requires_grad_(True)
         apply_rope(x, positions=None, max_position=S).pow(2).sum().backward()
-        assert x.grad.norm() > 1e-12
+        assert_healthy_gradient(x, "RoPE input")

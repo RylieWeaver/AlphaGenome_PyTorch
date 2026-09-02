@@ -16,14 +16,7 @@ from alphagenome_pt.convolutions import (
 )
 from alphagenome_pt.precision import FLOAT32_DTYPE_POLICY, dtype_policy_context
 
-
-def _healthy(param, name):
-    assert param.grad is not None, f"{name}: no gradient"
-    assert torch.isfinite(param.grad).all(), f"{name}: non-finite gradient"
-    norm = param.grad.norm().item()
-    # Treat gradients at or below 1e-12 as vanished in practice.
-    assert norm > 1e-12, f"{name}: gradient vanished ({norm})"
-    assert norm < 1e8, f"{name}: gradient exploded ({norm})"
+from .helpers import assert_healthy_gradient
 
 
 class TestComponentGradients:
@@ -39,14 +32,16 @@ class TestComponentGradients:
         conv(x).pow(2).mean().backward()
         assert x.grad is not None and torch.isfinite(x.grad).all()
         for attr in ("weight", "scale", "bias"):
-            _healthy(getattr(conv, attr), f"StandardizedConv1d.{attr}")
+            assert_healthy_gradient(
+                getattr(conv, attr), f"StandardizedConv1d.{attr}"
+            )
 
     def test_conv_block(self):
         block = ConvBlock(16, 32, sync_bn=False)
         x = torch.randn(2, 16, 64, requires_grad=True)
         block(x).pow(2).mean().backward()
         assert x.grad is not None and torch.isfinite(x.grad).all()
-        _healthy(block.conv.weight, "ConvBlock.conv.weight")
+        assert_healthy_gradient(block.conv.weight, "ConvBlock.conv.weight")
 
     def test_down_res_block(self):
         block = DownResBlock(16, 32, sync_bn=False)
