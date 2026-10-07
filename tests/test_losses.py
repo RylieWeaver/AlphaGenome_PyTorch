@@ -15,51 +15,72 @@ import torch
 
 from alphagenome_pt import losses
 
+
+def _value(loss):
+    return loss.value if isinstance(loss, losses.LossLeaf) else loss
+
 class TestSafeMaskedMean:
     def test_no_mask(self):
         x = torch.tensor([1.0, 2.0, 3.0, 4.0])
-        assert torch.isclose(losses._safe_masked_mean(x), torch.tensor(2.5))
+        leaf = losses._safe_masked_mean(x)
+        assert torch.equal(leaf.numerator, torch.tensor(10.0))
+        assert torch.equal(leaf.denominator, torch.tensor(4.0))
+        assert torch.isclose(leaf.value, torch.tensor(2.5))
 
     def test_with_mask(self):
         x = torch.tensor([1.0, 2.0, 3.0, 4.0])
         mask = torch.tensor([True, True, False, False])
-        assert torch.isclose(losses._safe_masked_mean(x, mask), torch.tensor(1.5))
+        leaf = losses._safe_masked_mean(x, mask)
+        assert torch.equal(leaf.numerator, torch.tensor(3.0))
+        assert torch.equal(leaf.denominator, torch.tensor(2.0))
+        assert torch.isclose(leaf.value, torch.tensor(1.5))
 
     def test_all_masked_is_zero_not_nan(self):
         # A fully masked input must give 0.0, not a 0/0 NaN.
         x = torch.tensor([1.0, 2.0, 3.0])
         mask = torch.tensor([False, False, False])
         out = losses._safe_masked_mean(x, mask)
-        assert torch.isfinite(out)
-        assert torch.isclose(out, torch.tensor(0.0))
+        assert torch.equal(out.numerator, torch.tensor(0.0))
+        assert torch.equal(out.denominator, torch.tensor(0.0))
+        assert torch.isfinite(out.value)
+        assert torch.isclose(out.value, torch.tensor(0.0))
 
 
 class TestPoissonLoss:
     def test_perfect_prediction_is_zero(self):
         y = torch.tensor([1.0, 2.0, 3.0])
         m = torch.ones(3, dtype=torch.bool)
-        assert losses.poisson_loss(y_true=y, y_pred=y, mask=m).item() < 1e-5
+        assert losses.poisson_loss(
+            y_true=y, y_pred=y, mask=m
+        ).value.item() < 1e-5
 
     def test_wrong_prediction_is_positive(self):
         yt = torch.tensor([1.0, 2.0, 3.0])
         yp = torch.tensor([3.0, 1.0, 2.0])
         m = torch.ones(3, dtype=torch.bool)
-        assert losses.poisson_loss(y_true=yt, y_pred=yp, mask=m).item() > 0
+        assert losses.poisson_loss(
+            y_true=yt, y_pred=yp, mask=m
+        ).value.item() > 0
 
 
 class TestMSE:
     def test_perfect_prediction_is_zero(self):
         y = torch.tensor([1.0, 2.0, 3.0])
         m = torch.ones(3, dtype=torch.bool)
-        assert losses.mse(y_true=y, y_pred=y, mask=m).item() < 1e-7
+        assert losses.mse(
+            y_true=y, y_pred=y, mask=m
+        ).value.item() < 1e-7
 
     def test_simple_error(self):
         # ((2-1)^2 + (4-2)^2) / 2 = 2.5
         yt = torch.tensor([1.0, 2.0])
         yp = torch.tensor([2.0, 4.0])
         m = torch.ones(2, dtype=torch.bool)
-        assert torch.isclose(losses.mse(y_true=yt, y_pred=yp, mask=m),
-                             torch.tensor(2.5), atol=1e-6)
+        assert torch.isclose(
+            losses.mse(y_true=yt, y_pred=yp, mask=m).value,
+            torch.tensor(2.5),
+            atol=1e-6,
+        )
 
 
 class TestMultinomialLoss:
@@ -95,7 +116,7 @@ class TestMultinomialLoss:
             multinomial_resolution=1, positional_weight=1.0)
         assert set(out) == {"loss", "loss_total", "loss_positional",
                             "zero_loss_positional"}
-        assert all(torch.isfinite(v).all() for v in out.values())
+        assert all(torch.isfinite(_value(v)).all() for v in out.values())
 
     @pytest.mark.parametrize("resolution", [1, 2, 4])
     def test_finite_at_every_resolution(self, resolution):
@@ -114,10 +135,14 @@ class TestMultinomialLoss:
         w2 = losses.multinomial_loss(positional_weight=2.0, **kw)
 
         # The count term must not move when the positional weight changes.
-        torch.testing.assert_close(w1["loss_total"], w2["loss_total"])
+        torch.testing.assert_close(
+            w1["loss_total"].value, w2["loss_total"].value
+        )
         # The difference is exactly one extra positional term.
         delta = (w2["loss"] - w1["loss"]).item()
-        assert np.isclose(delta, w1["zero_loss_positional"].item(), atol=1e-5)
+        assert np.isclose(
+            delta, w1["zero_loss_positional"].value.item(), atol=1e-5
+        )
 
 
 class TestCrossEntropy:
@@ -126,21 +151,21 @@ class TestCrossEntropy:
             y_pred_logits=torch.tensor([[[10.0, -10.0, -10.0]]]),
             y_true=torch.tensor([[[1.0, 0.0, 0.0]]]),
             mask=torch.ones(1, 1, 1, dtype=torch.bool), axis=-1)
-        assert loss.item() < 1e-3
+        assert loss.value.item() < 1e-3
 
     def test_bce_stable_at_extreme_logits(self):
         loss = losses.binary_crossentropy_from_logits(
             y_pred=torch.tensor([[[100.0, -100.0]]]),
             y_true=torch.tensor([[[1.0, 0.0]]]),
             mask=torch.ones(1, 1, 2, dtype=torch.bool))
-        assert torch.isfinite(loss)
+        assert torch.isfinite(loss.value)
 
     def test_cross_entropy_non_negative(self):
         loss = losses.cross_entropy_loss(
             y_true=torch.tensor([[[1.0, 2.0, 3.0]]]),
             y_pred=torch.tensor([[[3.0, 2.0, 1.0]]]),
             mask=torch.ones(1, 1, 3, dtype=torch.bool), axis=-1)
-        assert loss.item() >= 0
+        assert loss.value.item() >= 0
 
 
 class TestExtremeValues:
@@ -148,26 +173,32 @@ class TestExtremeValues:
         loss = losses.poisson_loss(
             y_true=torch.tensor([1.0, 2.0]), y_pred=torch.tensor([1e-8, 1e-8]),
             mask=torch.ones(2, dtype=torch.bool))
-        assert torch.isfinite(loss)
+        assert torch.isfinite(loss.value)
 
     def test_poisson_large_predictions(self):
         loss = losses.poisson_loss(
             y_true=torch.tensor([1.0, 2.0]), y_pred=torch.tensor([1e8, 1e8]),
             mask=torch.ones(2, dtype=torch.bool))
-        assert torch.isfinite(loss)
+        assert torch.isfinite(loss.value)
 
 
 class TestGradientThroughLoss:
     def test_poisson_gradient(self):
         yp = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
-        losses.poisson_loss(y_true=torch.tensor([1.5, 2.5, 2.0]), y_pred=yp,
-                            mask=torch.ones(3, dtype=torch.bool)).backward()
+        losses.poisson_loss(
+            y_true=torch.tensor([1.5, 2.5, 2.0]),
+            y_pred=yp,
+            mask=torch.ones(3, dtype=torch.bool),
+        ).value.backward()
         assert yp.grad is not None and torch.isfinite(yp.grad).all()
 
     def test_mse_gradient(self):
         yp = torch.tensor([1.0, 2.0], requires_grad=True)
-        losses.mse(y_true=torch.tensor([2.0, 4.0]), y_pred=yp,
-                   mask=torch.ones(2, dtype=torch.bool)).backward()
+        losses.mse(
+            y_true=torch.tensor([2.0, 4.0]),
+            y_pred=yp,
+            mask=torch.ones(2, dtype=torch.bool),
+        ).value.backward()
         assert yp.grad is not None and torch.isfinite(yp.grad).all()
 
     def test_multinomial_gradient(self):
@@ -184,8 +215,11 @@ class TestGradientThroughLoss:
     def test_cross_entropy_from_logits_gradient(self):
         logits = torch.tensor([[[2.0, 0.5, -1.0]]], requires_grad=True)
         losses.cross_entropy_loss_from_logits(
-            y_pred_logits=logits, y_true=torch.tensor([[[0.9, 0.05, 0.05]]]),
-            mask=torch.ones(1, 1, 1, dtype=torch.bool), axis=-1).backward()
+            y_pred_logits=logits,
+            y_true=torch.tensor([[[0.9, 0.05, 0.05]]]),
+            mask=torch.ones(1, 1, 1, dtype=torch.bool),
+            axis=-1,
+        ).value.backward()
         assert logits.grad is not None and torch.isfinite(logits.grad).all()
 
 
@@ -200,26 +234,26 @@ class TestGoldenValues:
     def test_poisson_golden(self):
         loss = losses.poisson_loss(y_true=self.Y_TRUE_3, y_pred=self.Y_PRED_3,
                                    mask=self.MASK_3)
-        assert torch.isclose(loss, torch.tensor(0.0079382462), atol=1e-7)
+        assert torch.isclose(loss.value, torch.tensor(0.0079382462), atol=1e-7)
 
     def test_mse_golden(self):
         loss = losses.mse(y_true=self.Y_TRUE_3, y_pred=self.Y_PRED_3,
                           mask=self.MASK_3)
-        assert torch.isclose(loss, torch.tensor(0.0199999977), atol=1e-7)
+        assert torch.isclose(loss.value, torch.tensor(0.0199999977), atol=1e-7)
 
     def test_cross_entropy_from_logits_golden(self):
         loss = losses.cross_entropy_loss_from_logits(
             y_pred_logits=torch.tensor([[[2.0, 0.5, -1.0, 0.1]]]),
             y_true=torch.tensor([[[0.9, 0.05, 0.03, 0.02]]]),
             mask=torch.ones(1, 1, 1, dtype=torch.bool), axis=-1)
-        assert torch.isclose(loss, torch.tensor(0.5554059148), atol=1e-7)
+        assert torch.isclose(loss.value, torch.tensor(0.5554059148), atol=1e-7)
 
     def test_binary_crossentropy_golden(self):
         loss = losses.binary_crossentropy_from_logits(
             y_pred=torch.tensor([[[2.0, -1.0, 0.5]]]),
             y_true=torch.tensor([[[1.0, 0.0, 1.0]]]),
             mask=torch.ones(1, 1, 3, dtype=torch.bool))
-        assert torch.isclose(loss, torch.tensor(0.3047555685), atol=1e-7)
+        assert torch.isclose(loss.value, torch.tensor(0.3047555685), atol=1e-7)
 
     def test_cross_entropy_golden(self):
         loss = losses.cross_entropy_loss(
@@ -227,7 +261,7 @@ class TestGoldenValues:
             y_pred=torch.tensor([[[1.5, 2.5, 0.5, 3.0], [0.8, 1.0, 2.0, 4.0]]]),
             mask=torch.ones((1, 2, 4), dtype=torch.bool), axis=-1)
         # 1e-6 here, not 1e-7: accumulation order differs slightly from JAX.
-        assert torch.isclose(loss, torch.tensor(1.4022779465), atol=1e-6)
+        assert torch.isclose(loss.value, torch.tensor(1.4022779465), atol=1e-6)
 
 
 class TestMultinomialGoldenBothBranches:
@@ -242,8 +276,16 @@ class TestMultinomialGoldenBothBranches:
 
     def test_components_match_jax(self):
         out = losses.multinomial_loss(**self.KW)
-        assert torch.isclose(out["loss_total"], torch.tensor(17.7364959717), atol=1e-4)
-        assert torch.isclose(out["loss_positional"], torch.tensor(8.7234439850), atol=1e-4)
+        assert torch.isclose(
+            out["loss_total"].value,
+            torch.tensor(17.7364959717),
+            atol=1e-4,
+        )
+        assert torch.isclose(
+            out["loss_positional"].value,
+            torch.tensor(8.7234439850),
+            atol=1e-4,
+        )
 
     def test_min_zero_false_matches_jax(self):
         out = losses.multinomial_loss(min_zero=False, **self.KW)

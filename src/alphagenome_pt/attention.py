@@ -9,6 +9,7 @@ from einops import rearrange, repeat
 # Internal
 from .layers import BatchNorm, LayerNorm
 from .precision import _ACTIVE_DTYPE_POLICY
+from .distributed import all_gather
 
 
 
@@ -19,6 +20,8 @@ def _shift(x):
     corresponding to keys j=0..S-1. In other words, we start with embeddings
     for all possible relative distances, then slide a window along those
     embeddings, where each window is a row in the [S, S] pairwise location matrix.
+
+    Shape in a nutshell: [..., S, 2S-1] --> [..., S, S]
 
     Example (S=3):
     Input:
@@ -51,7 +54,7 @@ def central_mask_features(rel, feature_size, max_sequence_length, device, dtype=
             ),
             device=device, dtype=dtype,
         )                                                                           # [F/2]
-    center_widths = widths_lin + widths_geo                                         # [F/2]   
+    center_widths = widths_lin + widths_geo                                         # [F/2]
 
     # Pairwise compare all absolute relative positions and thresholds
     onehot = (center_widths.unsqueeze(0) > rel.abs().unsqueeze(1)).to(dtype)        # [2L, F/2]: 0/1 if within threshold
@@ -75,8 +78,8 @@ def apply_rope(x: torch.Tensor, positions: torch.Tensor | None, max_position: in
         NOTE: This RoPE function is shape-agnostic AS LONG AS it obeys [B, S, *, C] where C is even.
         This is important to allow it to be used at various points in the model, including attention
         and Splicing Heads, which have different shapes. Simply creating a theta tensor with the last
-        dimensions and broadcasting would NOT always give what we want, since the sequence dimension 
-        might not be in the second to last place (e.g. in Splicing Head, the shape is [B, P, T, C], 
+        dimensions and broadcasting would NOT always give what we want, since the sequence dimension
+        might not be in the second to last place (e.g. in Splicing Head, the shape is [B, P, T, C],
         where P is the sequnce length, T is the number of tissues, and C is the number of channels).
 
         Apply Rotary Positional Embeddings (RoPE) to tensor 'x'.
@@ -143,7 +146,7 @@ class MHA(nn.Module):
         """
         Grouped-Query Attention (GQA):
         - Maps multiple query heads to a single shared key/value head.
-        
+
         Since this implementation is replicating the architectural description provided in the AlphaGenome paper, it:
         - Does not use bias in Q/K/V projections.
         - Uses LayerNorm after linear projections for Q, K, and V.
@@ -160,7 +163,6 @@ class MHA(nn.Module):
         self.v_head_dim = v_head_dim                                # C_v
         self.max_transformer_seq_len = max_transformer_seq_len      # S'
         self.logit_clip_value = 5.0
-        self.dropout = dropout
         self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
@@ -178,35 +180,44 @@ class MHA(nn.Module):
         # Output modules
         self.linear_embedding = nn.Linear(self.num_q_heads * self.v_head_dim, self.num_channels, bias=True)
         self.bn2 = BatchNorm(self.num_channels, sync=self.sync_bn, channels_dim=2)
-        self.out_drop = nn.Dropout(self.dropout)
+        self.out_drop = nn.Dropout(dropout)
 
-    def forward(self, x, attn_bias=None):                                       # x: [B, S', C'] | attn_bias: [B, G, S', S']
+    def forward(self, x, attn_bias=None, parallel_context=None):                    # x: [B, S', C'] | attn_bias: [B, G, S', S']
         # Setup
         B, S, _ = x.shape
 
         # Initial normalization
-        x = self.bn1(x)                                                         # [B, S', C']
-
+        x = self.bn1(x)                                                             # [B, S'_local, C']
         # Multihead Q, K, V followed by LN
         q = rearrange(
-            self.q_layer(x), 'b s (g h c) -> b s g h c', 
-            g=self.head_group_size, h=self.num_kv_heads, c=self.qk_head_dim      
-        )                                                                       # [B, S', C'] --> [B, S', G, H_q, C_qk]
+            self.q_layer(x), 'b s (g h c) -> b s g h c',
+            g=self.head_group_size, h=self.num_kv_heads, c=self.qk_head_dim
+        )                                                                           # [B, S'_local, C'] --> [B, S', G, H_q, C_qk]
         k = rearrange(
-            self.k_layer(x), 'b s (h c) -> b s h c', 
+            self.k_layer(x), 'b s (h c) -> b s h c',
             h=self.num_kv_heads, c=self.qk_head_dim
-        )                                                                       # [B, S', C'] --> [B, S', H_kv, C_qk]
+        )                                                                           # [B, S'_local, C'] --> [B, S', H_kv, C_qk]
         v = rearrange(
-            self.v_layer(x), 'b s (h c) -> b s h c', 
+            self.v_layer(x), 'b s (h c) -> b s h c',
             h=self.num_kv_heads, c=self.v_head_dim
-        )                                                                       # [B, S', C'] --> [B, S', H_kv, C_v]
-        q = self.norm_q(q)                                                      # [B, S', G, H_kv, C_qk]
-        k = self.norm_k(k)                                                      # [B, S', H_kv, C_qk]
-        v = self.norm_v(v)                                                      # [B, S', H_kv, C_v]
-        
+        )                                                                           # [B, S'_local, C'] --> [B, S', H_kv, C_v]
+        q = self.norm_q(q)                                                          # [B, S', G, H_kv, C_qk]
+        k = self.norm_k(k)                                                          # [B, S', H_kv, C_qk]
+        v = self.norm_v(v)                                                          # [B, S', H_kv, C_v]
+
+        # Gather seqpar shards
+        if parallel_context is not None and parallel_context.sp_enabled:
+            k = all_gather(k, dim=1, group=parallel_context.sp_group)
+            v = all_gather(v, dim=1, group=parallel_context.sp_group)
+
         # Apply RoPE
-        q = apply_rope(q, None, max_position=self.max_transformer_seq_len)      # [B, S', G, H_kv, C_qk]
-        k = apply_rope(k, None, max_position=self.max_transformer_seq_len)      # [B, S', H_kv, C_qk]
+        q_positions = None
+        if parallel_context is not None and parallel_context.sp_enabled:
+            # Slice actual sequence positions; max length only sets RoPE frequencies.
+            start, end = parallel_context.sp_bounds(k.shape[1])
+            q_positions = torch.arange(start, end, device=q.device)
+        q = apply_rope(q, q_positions, max_position=self.max_transformer_seq_len)   # [B, S', G, H_kv, C_qk] (specify positions for seqpar)
+        k = apply_rope(k, None, max_position=self.max_transformer_seq_len)          # [B, S', H_kv, C_qk]
 
         # Compute attention weights
         dtype_policy = _ACTIVE_DTYPE_POLICY.get()
@@ -217,14 +228,14 @@ class MHA(nn.Module):
                 "bsghc,bShc->bghsS",
                 q.to(compute_uptype),
                 k.to(compute_uptype),
-            ) / (self.qk_head_dim ** 0.5)                                       # [B, G, H_kv, S', S']
+            ) / (self.qk_head_dim ** 0.5)                                       # [B, G, H_kv, S'_local, S']
             if attn_bias is not None:
-                logits = logits + attn_bias.to(compute_uptype)                  # [B, G, H_kv, S', S']
+                logits = logits + attn_bias.to(compute_uptype)                  # [B, G, H_kv, S'_local, S']
         logits = (
             torch.tanh(logits / self.logit_clip_value)
             * self.logit_clip_value
         )
-        attn = torch.softmax(logits, dim=-1)                                    # [B, G, H_kv, S', S']
+        attn = torch.softmax(logits, dim=-1)                                    # [B, G, H_kv, S'_local, S']
 
         # Output calculation (back to the compute dtype)
         # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
@@ -249,17 +260,16 @@ class MLPBlock(nn.Module):
         # Read inputs
         self.num_channels = num_channels        # C'
         self.mlp_ratio = mlp_ratio              # M
-        self.dropout = dropout
         self.sync_bn = sync_bn
 
         # Modules
         self.bn1 = BatchNorm(self.num_channels, sync=self.sync_bn)
         self.fc1 = nn.Linear(self.num_channels, self.num_channels * self.mlp_ratio)
         self.act = nn.ReLU()
-        self.drop1 = nn.Dropout(self.dropout)
+        self.drop1 = nn.Dropout(dropout)
         self.fc2 = nn.Linear(self.num_channels * self.mlp_ratio, self.num_channels)
         self.bn2 = BatchNorm(self.num_channels, sync=self.sync_bn)
-        self.drop2 = nn.Dropout(self.dropout)
+        self.drop2 = nn.Dropout(dropout)
 
     def forward(self, x):       # [B, S, C]
         x = self.bn1(x)         # [B, S, C]
@@ -292,11 +302,11 @@ class PairMLPBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = self.norm(x)                    # [B, P, P, F]
-        x = self.fc1(x)                     # [B, P, P, F*M]
-        x = self.act(x)                     # [B, P, P, F*M]
-        x = self.fc2(x)                     # [B, P, P, F]
-        x = self.dropout(x)                 # [B, P, P, F]
+        x = self.norm(x)                    # [B, P_local, P, F]
+        x = self.fc1(x)                     # [B, P_local, P, F*M]
+        x = self.act(x)                     # [B, P_local, P, F*M]
+        x = self.fc2(x)                     # [B, P_local, P, F]
+        x = self.dropout(x)                 # [B, P_local, P, F]
         return x
 
 
@@ -314,22 +324,22 @@ class AttentionBiasBlock(nn.Module):
         self.act = nn.GELU(approximate="tanh")
         self.fc = nn.Linear(self.pair_channels, self.num_q_heads, bias=False)
 
-    def forward(self, x):                                                               # [B, P, P, F]
-        x = self.bn(x)                                                                  # [B, P, P, F]
-        x = self.act(x)                                                                 # [B, P, P, F]
-        x = self.fc(x)                                                                  # [B, P, P, H_q]
-        x = rearrange(x, 'b p1 p2 (g h) -> b g h p1 p2', g=self.head_group_size)        # [B, P, P, H_q] --> [B, G, H_kv, P, P]
+    def forward(self, x):                                                               # [B, P_local, P, F]
+        x = self.bn(x)                                                                  # [B, P_local, P, F]
+        x = self.act(x)                                                                 # [B, P_local, P, F]
+        x = self.fc(x)                                                                  # [B, P_local, P, H_q]
+        x = rearrange(x, 'b p1 p2 (g h) -> b g h p1 p2', g=self.head_group_size)        # [B, P_local, P, H_q] --> [B, G, H_kv, P_local, P]
         x = repeat(
-            x, 'b g h p1 p2 -> b g h (p1 w1) (p2 w2)',                                  # [B, G, H_kv, P, P] --> [B, G, H_kv, S', S']
+            x, 'b g h p1 p2 -> b g h (p1 w1) (p2 w2)',                                  # [B, G, H_kv, P_local, P] --> [B, G, H_kv, S'_local, S']
             w1=self.pair_downsample_width, w2=self.pair_downsample_width,
         )
-        return x                                                                        # [B, G, H_kv, S', S']
+        return x                                                                        # [B, G, H_kv, S'_local, S']
 
 
 class RowAttentionBlock(nn.Module):
     """
     Row-wise attention on pair features.
-    Input/Output: [B, P, P, F]
+    Input/Output: [B, P_local, P, F]
       - For each row i, attend across columns j∈[0..P-1].
     """
     def __init__(
@@ -341,7 +351,6 @@ class RowAttentionBlock(nn.Module):
         super().__init__()
         # Read inputs
         self.pair_channels = pair_channels      # F
-        self.dropout = dropout
         self.sync_bn = sync_bn
 
         # Normalization
@@ -353,29 +362,31 @@ class RowAttentionBlock(nn.Module):
         self.linear_v = nn.Linear(self.pair_channels, self.pair_channels, bias=True)
 
         # Output
-        self.dropout = nn.Dropout(self.dropout)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         # Normalize inputs
-        x = self.norm(x)                                            # [B, P, P, F]
+        x = self.norm(x)                                            # [B, P_local, P, F]
 
         # Project
-        q = self.linear_q(x)                                        # [B, P, P, F]
-        k = self.linear_k(x)                                        # [B, P, P, F]
-        v = self.linear_v(x)                                        # [B, P, P, F]
+        q = self.linear_q(x)                                        # [B, P_local, P, F]
+        k = self.linear_k(x)                                        # [B, P_local, P, F]
+        v = self.linear_v(x)                                        # [B, P_local, P, F]
 
         # Compute attention weights
         d = q.shape[-1]
         dtype_policy = _ACTIVE_DTYPE_POLICY.get()
         compute_dtype = dtype_policy.compute_dtype
         compute_uptype = dtype_policy.compute_uptype
+        # NOTE: Under SP, each rank owns complete rows: [B, P_local, P, F].
+        # Since row attention only mixes across dim=2, no all_gather is needed.
         with torch.autocast(device_type=q.device.type, enabled=False):
             logits = torch.einsum(
                 "bpPf,bpkf->bpPk",
                 q.to(compute_uptype),
                 k.to(compute_uptype),
-            ) / (d**0.5)                                            # [B, P, P, P]
-        a = torch.softmax(logits, dim=3)                            # [B, P, P, P]
+            ) / (d**0.5)                                            # [B, P_local, P, P]
+        a = torch.softmax(logits, dim=3)                            # [B, P_local, P, P]
 
         # Output calculation (back to the compute dtype)
         # NOTE: JAX uses BF16 operands with FP32 accumulation. PyTorch cannot
@@ -388,10 +399,10 @@ class RowAttentionBlock(nn.Module):
                 "bpPk,bpkf->bpPf",
                 a.to(compute_uptype),
                 v.to(compute_uptype),
-            ).to(compute_dtype)                                     # [B, P, P, F]
+            ).to(compute_dtype)                                     # [B, P_local, P, F]
 
         # Output
-        x = self.dropout(x)                                         # [B, P, P, F]
+        x = self.dropout(x)                                         # [B, P_local, P, F]
         return x
 
 
@@ -404,7 +415,6 @@ class SequenceToPairBlock(nn.Module):
         self.max_pair_seq_len = max_pair_seq_len                # P
         self.pair_downsample_width = pair_downsample_width      # W_p
         self.pair_heads = pair_heads                            # H_p
-        self.dropout = dropout
         self.sync_bn = sync_bn
 
         # Make pos_channels even
@@ -433,43 +443,63 @@ class SequenceToPairBlock(nn.Module):
         self.linear_y_q = nn.Linear(self.num_channels, self.pair_channels, bias=False)
         self.linear_y_k = nn.Linear(self.num_channels, self.pair_channels, bias=False)
         self.linear_pair = nn.Linear(self.pair_heads, self.pair_channels)
-        self.dropout = nn.Dropout(self.dropout)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):                                                                                   # [B, S', C']
+    def forward(self, x, parallel_context=None):                                                        # [B, S'_local, C']
         # Setup
         B, S = x.shape[0], x.shape[1]
-        P = S // self.pair_downsample_width
+        P_local = S // self.pair_downsample_width
+        P = P_local * (
+            parallel_context.sp_size
+            if parallel_context is not None and parallel_context.sp_enabled
+            else 1
+        )
         H = self.pair_heads
         F = self.pair_channels
         device = x.device
         dtype=x.dtype
 
         # Reduction and normalization
-        x = self.pool(x)                                                                                    # [B, C', P]
-        x = self.norm(x)                                                                                    # [B, P, C']
-
+        x = self.pool(x)                                                                                # [B, P_local, C']
+        x = self.norm(x)
         # Non-positional attention
-        q = self.linear_q(x).reshape(B, P, H, F)                                                            # [B, P, H_p, F]
-        k = self.linear_k(x).reshape(B, P, H, F)                                                            # [B, P, H_p, F]
+        q = self.linear_q(x).reshape(B, P_local, H, F)                                                  # [B, P_local, H_p, F]
+        k = self.linear_k(x).reshape(B, P_local, H, F)
+        if parallel_context is not None and parallel_context.sp_enabled:
+            k = all_gather(k, dim=1, group=parallel_context.sp_group)                                   # [B, P, H_p, F]
 
         # Positional attention
-        relative_positions = torch.arange(-P, P, device=device)                                             # [2P] ([-L, ..., -1, 0, 1, ..., L-1])
+        relative_positions = torch.arange(-P, P, device=device)                                         # [2P] ([-L, ..., -1, 0, 1, ..., L-1])
         pos_features = central_mask_features(
-            rel=relative_positions, feature_size=self.pos_channels,                                         # [2P, C_p]
+            rel=relative_positions, feature_size=self.pos_channels,                                     # [2P, C_p]
             max_sequence_length=self.max_pair_seq_len, device=device, dtype=dtype
         )
-        pos_encoding = self.linear_pos_features(pos_features).reshape(2*P, H, F)                            # [2P, H_p, F]
-        rel_q_a = torch.einsum('bqhc,phc->bqph', q + self.q_r_bias, pos_encoding)                           # [B, P, 2P, H_p]
-        rel_q_a = _shift(rel_q_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                                   # [B, P, P, H_p]
-        rel_k_a = torch.einsum('bkhc,phc->bkph', k + self.k_r_bias, pos_encoding)                           # [B, P, 2P, H_p]
-        rel_k_a = _shift(rel_k_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                                   # [B, P, P, H_p]
-        a = torch.einsum('bqhc,bkhc->bqkh', q, k) + 0.5*(rel_q_a + rel_k_a.transpose(1, 2))                 # [B, P, P, H_p]
+        pos_encoding = self.linear_pos_features(pos_features).reshape(2*P, H, F)                        # [2P, H_p, F]
+        if parallel_context is None or not parallel_context.sp_enabled:
+            rel_q_a = torch.einsum('bqhc,phc->bqph', q + self.q_r_bias, pos_encoding)                   # [B, P, 2P, H_p]
+            rel_q_a = _shift(rel_q_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                           # [B, P, P, H_p]
+            rel_k_a = torch.einsum('bkhc,phc->bkph', k + self.k_r_bias, pos_encoding)                   # [B, P, 2P, H_p]
+            rel_k_a = _shift(rel_k_a.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)                           # [B, P, P, H_p]
+            rel_k_a = rel_k_a.transpose(1, 2)                                                           # [B, P, P, H_p] (query, key)
+        else:
+            q_start, q_end = parallel_context.sp_bounds(P)
+            q_pos = torch.arange(q_start, q_end, device=device)                                         # [P_local]
+            k_pos = torch.arange(P, device=device)                                                      # [P]
+            # NOTE: Use offset of P because positions [-P, P-1] correspond to idx [0, 2P-1]
+            # NOTE: Can't use _shift() because is assume axes shape [P x P]
+            q_pos_encoding = pos_encoding[P + k_pos[None, :] - q_pos[:, None]]                          # [P_local, P, H_p, F] (rel pos q -> k)
+            k_pos_encoding = pos_encoding[P + q_pos[:, None] - k_pos[None, :]]                          # [P_local, P, H_p, F] (rel pos k -> q)
+            rel_q_a = torch.einsum('bqhc,qkhc->bqkh', q + self.q_r_bias, q_pos_encoding)                # [B, P_local, P, H_p]
+            rel_k_a = torch.einsum('bkhc,qkhc->bqkh', k + self.k_r_bias, k_pos_encoding)                # [B, P_local, P, H_p]
+        a = torch.einsum('bqhc,bkhc->bqkh', q, k) + 0.5 * (rel_q_a + rel_k_a)                           # [B, P_local, P, H_p]
 
         # Output
-        y_q = self.linear_y_q(self.act(x))                                                                  # [B, P, F]
-        y_k = self.linear_y_k(self.act(x))                                                                  # [B, P, F]
-        pair_activations = self.linear_pair(a) + y_q[:, :, None, :] + y_k[:, None, :, :]                    # [B, P, P, F]
-        return self.dropout(pair_activations)                                                               # [B, P, P, F]
+        y_q = self.linear_y_q(self.act(x))                                                              # [B, P_local, F]
+        y_k = self.linear_y_k(self.act(x))                                                              # [B, P_local, F]
+        if parallel_context is not None and parallel_context.sp_enabled:
+            y_k = all_gather(y_k, dim=1, group=parallel_context.sp_group)                               # [B, P, F]
+        pair_activations = self.linear_pair(a) + y_q[:, :, None, :] + y_k[:, None, :, :]                # [B, P_local, P, F]
+        return self.dropout(pair_activations)                                                           # [B, P_local, P, F]
 
 
 class PairUpdateBlock(nn.Module):
@@ -483,7 +513,6 @@ class PairUpdateBlock(nn.Module):
         self.pair_heads = pair_heads                            # H_p
         self.pos_channels = pos_channels                        # C_p
         self.mlp_ratio = mlp_ratio                              # M
-        self.dropout = dropout
         self.sync_bn = sync_bn
 
         # Modules
@@ -494,27 +523,29 @@ class PairUpdateBlock(nn.Module):
             pair_downsample_width=self.pair_downsample_width,
             pair_heads=self.pair_heads,
             pos_channels=self.pos_channels,
-            dropout=self.dropout,
+            dropout=dropout,
             sync_bn=self.sync_bn
         )
         self.row_attention_block = RowAttentionBlock(
             pair_channels=self.pair_channels,
-            dropout=self.dropout,
+            dropout=dropout,
             sync_bn=self.sync_bn,
         )
         self.pair_mlp_block = PairMLPBlock(
             pair_channels=self.pair_channels,
             mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout,
+            dropout=dropout,
             sync_bn=self.sync_bn
         )
 
-    def forward(self, sequence_input, pair_input):              # [B, S', C'] | [B, P, P, F]
-        y = self.sequence_to_pair_block(sequence_input)         # [B, P, P, F]
-        x = y if pair_input is None else pair_input + y         # [B, P, P, F]
-        x = x + self.row_attention_block(x)                     # [B, P, P, F]
-        x = x + self.pair_mlp_block(x)                          # [B, P, P, F]
-        return x                                                # [B, P, P, F]
+    def forward(self, sequence_input, pair_input, parallel_context=None):       # [B, S'_local, C'] | [B, P_local, P, F]
+        y = self.sequence_to_pair_block(
+            sequence_input, parallel_context=parallel_context
+        )                                                       # [B, P_local, P, F]
+        x = y if pair_input is None else pair_input + y         # [B, P_local, P, F]
+        x = x + self.row_attention_block(x)                     # [B, P_local, P, F]
+        x = x + self.pair_mlp_block(x)                          # [B, P_local, P, F]
+        return x                                                # [B, P_local, P, F]
 
 
 class TransformerTowerBlock(nn.Module):
@@ -551,7 +582,6 @@ class TransformerTowerBlock(nn.Module):
         self.pair_heads = pair_heads                            # H_p
         self.pos_channels = pos_channels                        # C_p
         self.mlp_ratio = mlp_ratio                              # M
-        self.dropout = dropout
         self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
@@ -565,7 +595,7 @@ class TransformerTowerBlock(nn.Module):
                 pair_heads=self.pair_heads,
                 pos_channels=self.pos_channels,
                 mlp_ratio=self.mlp_ratio,
-                dropout=self.dropout,
+                dropout=dropout,
                 sync_bn=self.sync_bn,
             )
         self.attn_bias = AttentionBiasBlock(
@@ -582,20 +612,25 @@ class TransformerTowerBlock(nn.Module):
             self.num_kv_heads,
             self.qk_head_dim,
             self.v_head_dim,
-            self.dropout,
+            dropout,
             sync_bn=self.sync_bn,
         )
         self.mlp = MLPBlock(
             num_channels=self.num_channels,
             mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout,
+            dropout=dropout,
             sync_bn=self.sync_bn
         )
 
-    def forward(self, x, pair_x):                       # x: [B, S', C'] | pair_x: [B, P, P, F] or None
+    def forward(self, x, pair_x, parallel_context=None):            # x: [B, S'_local, C'] | pair_x: [B, P_local, P, F] or None
         if self.do_pair_update:
-            pair_x = self.pair_update(x, pair_x)        # [B, P, P, F]
-        attn_bias = self.attn_bias(pair_x)              # [B, H_q // H_kv, S', S']
-        x = x + self.mha(x, attn_bias=attn_bias)        # [B, S', C']
-        x = x + self.mlp(x)                             # [B, S', C']
-        return x, pair_x                                # [B, S', C'], [B, P, P, F]
+            pair_x = self.pair_update(
+                x, pair_x, parallel_context=parallel_context
+            )                                                       # [B, P_local, P, F]
+        attn_bias = self.attn_bias(pair_x)                          # [B, H_q // H_kv, S'_local, S']
+        x = x + self.mha(
+            x, attn_bias=attn_bias,
+            parallel_context=parallel_context
+        )                                                           # [B, S'_local, C']
+        x = x + self.mlp(x)                                         # [B, S'_local, C']
+        return x, pair_x                                            # [B, S'_local, C'], [B, P_local, P, F]

@@ -6,6 +6,7 @@ import torch
 import alphagenome_pt.losses as loss_functions
 from alphagenome_pt import (
     HeadName,
+    LossLeaf,
     synthetic_batch,
     synthetic_metadata,
     small_alphagenome,
@@ -84,8 +85,8 @@ def test_splice_junction_loss_tree_combines_loss_components(monkeypatch):
     )
 
     components = {
-        "total_count": torch.tensor(2.0),
-        "ratio": torch.tensor(3.0),
+        "total_count": LossLeaf(2.0),
+        "ratio": LossLeaf(3.0),
     }
     monkeypatch.setattr(
         loss_functions,
@@ -104,7 +105,8 @@ def test_splice_junction_loss_tree_combines_loss_components(monkeypatch):
     # The official head weight applies to every term, while its internal
     # total-count weight applies only to the count terms.
     expected = 0.2 * 2 * (
-        components["ratio"] + 0.2 * components["total_count"]
+        components["ratio"].value
+        + 0.2 * components["total_count"].value
     )
     expected = model.dtype_policy.cast_output(expected)
     torch.testing.assert_close(

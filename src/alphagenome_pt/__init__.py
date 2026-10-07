@@ -1,5 +1,11 @@
 # Internal
-from .distributed import is_dist, is_rank0, dist_print, dist_sum
+from .distributed import (
+    DDP_AlphaGenome, FSDP_AlphaGenome, ParallelContext,
+    all_gather, all_to_all_transpose, sp_broadcast_data_batch, neighbor_gather,
+    distribute_alphagenome,
+    is_dist, is_rank0,
+    dist_print, dist_sum,
+)
 from .bundles import BundleName
 from .heads import HeadName
 from .schemas import DataBatch
@@ -68,6 +74,12 @@ __all__ = [
     "AlphaGenomeConfig",
     "BundleName",
     "DataBatch",
+    "DDP_AlphaGenome",
+    "FSDP_AlphaGenome",
+    "all_gather",
+    "all_to_all_transpose",
+    "sp_broadcast_data_batch",
+    "neighbor_gather",
     "DEEPMIND_DTYPE_POLICY",
     "DNAOneHotEncoder",
     "DEFAULT_ALPHAGENOME_REPO_ID",
@@ -87,8 +99,10 @@ __all__ = [
     "LossOutput",
     "MetricTree",
     "Metadata",
+    "ParallelContext",
     "OrganismLoadSpec",
     "SequenceEncoder",
+    "distribute_alphagenome",
     "deepmind_config",
     "deepmind_alphagenome_config",
     "deepmind_alphagenome_metadata",

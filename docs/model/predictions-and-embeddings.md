@@ -131,6 +131,15 @@ The principal outputs are:
   and the optional batch mask. Junction predictions are exactly zero wherever
   this mask is zero.
 
+:::{dropdown} Shapes Under Sequence Parallelism
+:color: info
+:icon: info
+
+The shapes below describe full outputs for one batch. Under sequence
+parallelism, each rank returns its owned shard (see
+[SP shape table](parallelism.md#returned-predictions-and-embeddings)).
+:::
+
 :::{dropdown} Show the Prediction Tree
 
 ```python

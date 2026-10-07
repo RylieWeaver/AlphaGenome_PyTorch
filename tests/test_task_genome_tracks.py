@@ -12,6 +12,7 @@ import torch
 from alphagenome_pt import (
     DataBatch,
     HeadName,
+    LossLeaf,
     synthetic_batch,
     synthetic_metadata,
     small_alphagenome,
@@ -125,19 +126,19 @@ def test_genome_track_loss_tree_combines_loss_components(
     # NOTE: Just set the component losses so that we can avoid
     # mask-handling to call _compute_loss().
     components = {
-        "loss_total": torch.tensor(2.0),
-        "loss_positional": torch.tensor(4.0),
-        "zero_loss_positional": torch.tensor(3.0),
+        "loss_total": LossLeaf(2.0),
+        "loss_positional": LossLeaf(4.0),
+        "zero_loss_positional": LossLeaf(3.0),
     }
     monkeypatch.setattr(head, "_compute_loss", lambda **_: components)
 
     result = model.loss(batch)
 
     expected = (
-        components["loss_total"]
+        components["loss_total"].value
         # NOTE: Change the 5.0 multiplier if we want
         # that to be configurable in the future.
-        + 5.0 * components[positional_key]
+        + 5.0 * components[positional_key].value
     )
     expected = model.dtype_policy.cast_output(expected)
     torch.testing.assert_close(

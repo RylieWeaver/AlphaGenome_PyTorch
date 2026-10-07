@@ -104,6 +104,8 @@ def test_model_loss_returns_output_dtype(policy_name):
 
     assert result.total.dtype == policy.output_dtype
     assert all(
-        leaf.value.dtype == policy.output_dtype
+        leaf.numerator.dtype == policy.output_dtype
+        and leaf.denominator.dtype == policy.output_dtype
+        and leaf.value.dtype == policy.output_dtype
         for _, leaf in result.tree.iter_leaves()
     )

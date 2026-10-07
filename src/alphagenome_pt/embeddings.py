@@ -7,9 +7,13 @@ from einops import repeat
 
 # Internal
 from .layers import BatchNorm, LayerNorm, GELU_1702
+from .distributed import all_to_all_transpose
+from .utils import _register_pytree_dataclass
 
 
 
+# DDP must traverse these tensors when returned outputs are unused by the loss.
+@_register_pytree_dataclass
 @dataclass
 class Embeddings:
     """
@@ -19,9 +23,9 @@ class Embeddings:
     - P: S // 2048
     """
     
-    embeddings_1bp: torch.Tensor | None = None        # [B, S, C_0]
-    embeddings_128bp: torch.Tensor | None = None      # [B, S', C_stages]
-    embeddings_pair: torch.Tensor | None = None       # [B, P, P, F]
+    embeddings_1bp: torch.Tensor | None = None        # [B, S_local, C_0]
+    embeddings_128bp: torch.Tensor | None = None      # [B, S'_local, C_stages]
+    embeddings_pair: torch.Tensor | None = None       # [B, P_local, P, F]
 
     def get_sequence_embeddings(self, resolution: int) -> torch.Tensor:
         if resolution == 128:
@@ -85,18 +89,27 @@ class OutputPairEmbedder(nn.Module):
         self.organism_embed = nn.Embedding(num_organisms, pair_channels)
         self.act = GELU_1702()
 
-    def forward(self, x, organism_index):                           # x: [B, P, P, F] | organism_index: [B]
-        # Symmetrize
-        x = add('b p1 p2 f, b p2 p1 f -> b p1 p2 f', x, x) / 2.0    # [B, P, P, F] + [B, P, P, F] --> [B, P, P, F]
+    def forward(self, x, organism_index, parallel_context=None):        # x: [B, P_local, P, F] | organism_index: [B]
+        # Symmetrization needs the corresponding transposed row block.
+        if parallel_context is not None and parallel_context.sp_enabled:
+            transposed_x = all_to_all_transpose(
+                x,
+                row_dim=1,
+                column_dim=2,
+                group=parallel_context.sp_group,
+            )                                                           # [B, P_local, P, F]
+            x = (x + transposed_x) / 2.0                                # [B, P_local, P, F]
+        else:
+            x = add('b p1 p2 f, b p2 p1 f -> b p1 p2 f', x, x) / 2.0    # [B, P, P, F] + [B, P, P, F] --> [B, P, P, F]
 
         # Normalize
-        x = self.norm(x)                                            # [B, P, P, F]
+        x = self.norm(x)                                                # [B, P_local, P, F]
 
         # Get organism embedding
         if self.num_organisms >= 1:
             org_emb = self.organism_embed(organism_index)
-            x = add('b p1 p2 f, b f -> b p1 p2 f', x, org_emb)      # [B, P, P, F] + [B, F] --> [B, P, P, F]
+            x = add('b p1 p2 f, b f -> b p1 p2 f', x, org_emb)          # [B, P_local, P, F] + [B, F] --> [B, P_local, P, F]
 
         # Apply activation
-        x = self.act(x)                                             # [B, P, P, F]
+        x = self.act(x)                                                 # [B, P_local, P, F]
         return x

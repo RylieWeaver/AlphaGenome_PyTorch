@@ -36,6 +36,14 @@ Compute, inspect, and accumulate the component losses stored in a
 `MetricTree`.
 :::
 
+:::{grid-item-card} Use Multiple GPUs
+:link: parallelism
+:link-type: doc
+:class-card: sd-card-hover
+
+Use data and/or sequence parallelism with DDP or FSDP.
+:::
+
 ::::
 
 ```{toctree}
@@ -45,4 +53,5 @@ Compute, inspect, and accumulate the component losses stored in a
 predictions-and-embeddings
 inference
 training
+parallelism
 ```

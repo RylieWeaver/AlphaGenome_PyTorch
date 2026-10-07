@@ -26,7 +26,7 @@ The normal suite skips tests that require network access, official JAX checkpoin
 | --- | --- | --- |
 | Hugging Face downloads | `ALPHAGENOME_PT_RUN_HF_DOWNLOAD_TEST=1 python -m pytest tests/test_checkpoint_download.py` | Network access and storage for converted artifacts |
 | JAX state mapping | `ALPHAGENOME_PT_RUN_JAX_MAPPING_TEST=1 python -m pytest -s tests/test_mapping_state.py` | [Checkpoint Conversion](checkpoint-conversion/index.md) setup and official checkpoint access |
-| DDP loss gradients | `torchrun --standalone --nproc_per_node=1 --module tests.test_model_ddp_loss` | PyTorch distributed support |
+| SP/DP/FSDP equivalence | `torchrun --standalone --nproc-per-node=4 --module tests.test_parallelism` | Four CUDA GPUs and NCCL |
 | Distributed batch normalization | `torchrun --nproc_per_node=2 tests/test_bn_grad.py` | Two workers and PyTorch distributed support |
 
 :::{dropdown} Optional Check Resource Requirements

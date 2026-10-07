@@ -10,11 +10,13 @@ import enum
 import math
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 # Internal
 from .attention import apply_rope
+from .distributed import all_gather, dist_sum
 from .precision import _ACTIVE_DTYPE_POLICY
 from .metadata import Metadata
 from .schemas import Channels
@@ -557,6 +559,7 @@ class Head(nn.Module, metaclass=abc.ABCMeta):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
 
@@ -725,18 +728,24 @@ class GenomeTracksHead(Head):
         targets: torch.Tensor,              # [B, S, C]
         targets_mask: torch.Tensor,         # [B, #S, C]
         resolution: int,
-    ) -> dict[str, torch.Tensor]:
+        parallel_context=None,
+    ) -> dict[str, torch.Tensor | losses.LossLeaf]:
         """Computes the loss for the head at a given resolution."""
         assert predictions.shape == targets.shape, \
             f'Predictions shape {predictions.shape} does not match targets shape {targets.shape}.'
         scaled_targets = self.scale(targets, organism_index, resolution)
+        sequence_group = (
+            parallel_context.sp_group
+            if parallel_context is not None and parallel_context.sp_enabled
+            else None
+        )
         all_losses = losses.multinomial_loss(
             y_pred=predictions,
             y_true=scaled_targets,
             mask=targets_mask,
             positional_weight=_GENOME_TRACK_POSITIONAL_WEIGHT,
-            multinomial_resolution=predictions.shape[-2],
             min_zero=self._min_zero_multinomial_loss,
+            sequence_group=sequence_group,
         )
         return all_losses
     
@@ -744,12 +753,16 @@ class GenomeTracksHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if self._bundle is None:
             raise ValueError('Bundle is required for loss computation.')
         
         tracks, mask = batch.get_genome_tracks(self._bundle)
+        if parallel_context is not None and parallel_context.sp_enabled:
+            tracks = parallel_context.sp_shard(tracks, dim=1)
+
         mask = self._combine_metadata_mask(
             mask,
             name="_track_mask",
@@ -764,7 +777,7 @@ class GenomeTracksHead(Head):
         
         bundle_resolution = self._bundle.get_resolution()
         resolution_losses: dict[str, losses.MetricNode] = {}
-        
+
         for resolution in self._resolutions:
             predictions_for_resolution = predictions[
                 f'scaled_predictions_{resolution}bp'
@@ -780,6 +793,7 @@ class GenomeTracksHead(Head):
                 targets=targets,
                 targets_mask=mask,
                 resolution=resolution,
+                parallel_context=parallel_context,
             )
             positional_loss = all_losses[
                 'zero_loss_positional'
@@ -787,9 +801,9 @@ class GenomeTracksHead(Head):
                 else 'loss_positional'
             ]
             resolution_losses[f'{resolution}bp'] = {
-                'total_count': losses.LossLeaf(all_losses['loss_total']),
-                'positional': losses.LossLeaf(
-                    _GENOME_TRACK_POSITIONAL_WEIGHT * positional_loss
+                'total_count': all_losses['loss_total'],
+                'positional': positional_loss.scaled(
+                    _GENOME_TRACK_POSITIONAL_WEIGHT
                 ),
             }
 
@@ -822,7 +836,7 @@ class ContactMapsHead(Head):
 
     def _forward(
         self,
-        pair_embeddings: torch.Tensor,      # [B, S, S, C]
+        pair_embeddings: torch.Tensor,      # [B, P_local, P, C] (SP) or [B, P, P, C]
         organism_index: torch.Tensor,       # [B]
     ) -> torch.Tensor:
         """Predicts contact maps from pairwise embeddings."""
@@ -847,16 +861,24 @@ class ContactMapsHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (targets := batch.contact_maps) is None:
             raise ValueError('contact_maps target not in batch.')
-        
-        B, S, _, T = targets.shape
-        device = batch.get_organism_index().device
 
-        if (targets_mask := batch.contact_maps_mask) is None:
-            targets_mask = torch.ones(B, 1, 1, T, dtype=torch.bool, device=device)
+        targets_mask = batch.contact_maps_mask
+        if parallel_context is not None and parallel_context.sp_enabled:
+            targets = parallel_context.sp_shard(targets, dim=1)
+            if targets_mask is not None and targets_mask.shape[1] > 1:
+                targets_mask = parallel_context.sp_shard(targets_mask, dim=1)
+
+        if targets_mask is None:
+            B, _, _, T = targets.shape
+            device = targets.device
+            targets_mask = torch.ones(
+                B, 1, 1, T, dtype=torch.bool, device=device
+            )
         targets_mask = self._combine_metadata_mask(
             targets_mask,
             name="_track_mask",
@@ -873,8 +895,12 @@ class ContactMapsHead(Head):
             torch.isnan(targets), False, targets_mask
         )
         targets = torch.where(torch.isnan(targets), 0.0, targets)
-        loss = losses.mse(contact_predictions, targets, targets_mask)
-        return {'mse': losses.LossLeaf(loss)}
+        loss = losses.mse(
+            contact_predictions,
+            targets,
+            targets_mask,
+        )
+        return {'mse': loss}
 
 
 class SpliceSitesClassificationHead(Head):
@@ -928,10 +954,14 @@ class SpliceSitesClassificationHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (splice_sites := batch.splice_sites) is None:
             raise ValueError('splice_sites target not in batch.')
+        if parallel_context is not None and parallel_context.sp_enabled:
+            splice_sites = parallel_context.sp_shard(splice_sites, dim=1)
+
         logits = predictions['logits']
         assert splice_sites.shape == logits.shape, \
                 'Predictions shape does not match targets shape.'
@@ -956,7 +986,7 @@ class SpliceSitesClassificationHead(Head):
             axis=-1,
         )
         return {
-            'cross_entropy': losses.LossLeaf(loss),
+            'cross_entropy': loss,
         }
 
 
@@ -1011,15 +1041,27 @@ class SpliceSitesUsageHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (splice_site_usage := batch.splice_site_usage) is None:
             raise ValueError('splice_site_usage target not in batch.')
+        if parallel_context is not None and parallel_context.sp_enabled:
+            splice_site_usage = parallel_context.sp_shard(
+                splice_site_usage, dim=1
+            )
+
         logits = predictions['logits']
         assert splice_site_usage.shape == logits.shape, \
             'Predictions shape does not match targets shape.'
         
         mask = batch.splice_site_usage_mask
+        if (
+            parallel_context is not None and parallel_context.sp_enabled
+            and mask is not None
+            and mask.shape[1] > 1
+        ):
+            mask = parallel_context.sp_shard(mask, dim=1)
         mask = self._combine_metadata_mask(
             mask,
             name="_track_mask",
@@ -1032,7 +1074,7 @@ class SpliceSitesUsageHead(Head):
             mask=mask,
         )
         return {
-            'binary_cross_entropy': losses.LossLeaf(loss),
+            'binary_cross_entropy': loss,
         }
 
 
@@ -1118,24 +1160,37 @@ class SpliceSitesJunctionHead(Head):
     
     def _forward(
         self,
-        x: torch.Tensor,                        # [B, S, C]
-        splice_site_positions: torch.Tensor,    # [B, 4, P]
-        organism_index: torch.Tensor,           # [B]
-        tissue_mask: torch.Tensor | None,       # [B, #D, #A, T or 2*T]
-    ) -> tuple[torch.Tensor, torch.Tensor]:     # both [B, D, A, 2*T]
-        """Splice site junctions."""
-        assert splice_site_positions.shape[1] == 4, \
-            'splice_site_positions must have shape [B, 4, P] for 4 DNA base pairs.'
-        pos_donor_idx = splice_site_positions[:, 0, :]      # [B, D]
-        pos_accept_idx = splice_site_positions[:, 1, :]     # [B, A]
-        neg_donor_idx = splice_site_positions[:, 2, :]      # [B, D]
-        neg_accept_idx = splice_site_positions[:, 3, :]     # [B, A]
+        x: torch.Tensor,                       # [B, S_local, C] (SP) or [B, S, C]
+        splice_site_positions: torch.Tensor,   # [B, 4, P]
+        organism_index: torch.Tensor,          # [B]
+        tissue_mask: torch.Tensor | None,      # [B, #D, #A, T or 2*T]
+        parallel_context=None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:    # both [B, D_local, A, 2*T]
+        """Compute junctions for this rank's donor rows and all acceptors."""
+        # NOTE: SP-split the donors (may fall out of that rank's classic subsequence)
+        # This mainly saves us compute on the expensive einsum dot-prod.
+        num_donors = splice_site_positions.shape[2]
+        donor_start, donor_end = (
+            parallel_context.sp_bounds(num_donors)
+            if parallel_context is not None and parallel_context.sp_enabled
+            else (0, num_donors)
+        )
+        pos_donor_idx = splice_site_positions[
+            :, 0, donor_start:donor_end
+        ]                                                       # [B, D_local]
+        pos_accept_idx = splice_site_positions[:, 1]            # [B, A]
+        neg_donor_idx = splice_site_positions[
+            :, 2, donor_start:donor_end
+        ]                                                       # [B, D_local]
+        neg_accept_idx = splice_site_positions[:, 3]            # [B, A]
 
         batch_mask = (
             self._normalize_junction_mask(tissue_mask)
             if tissue_mask is not None
             else None
         )
+        if batch_mask is not None and batch_mask.shape[1] > 1:
+            batch_mask = batch_mask[:, donor_start:donor_end]
         track_mask = self._combine_metadata_mask(
             batch_mask,
             name="_track_mask",
@@ -1146,30 +1201,53 @@ class SpliceSitesJunctionHead(Head):
         def _index_embedding(embedding, indices):
             # embedding: [B, S, C], indices: [B, P] (may contain -1)
             B, S, C = embedding.shape
-            safe = indices.clamp(min=0)                         # gather can’t take -1
-            idx = safe.unsqueeze(-1).expand(-1, -1, C).long()   # [B, P, C]
+            safe = indices.clamp_min(0)                         # gather can't take -1
+            idx = safe[..., None].expand(-1, -1, C).long()      # [B, P, C]
             return embedding.gather(dim=1, index=idx)           # [B, P, C]
 
-        def _apply_rope(x, indices, name: str):                                 # x: [B, S, C_splice] | indices: [B, P]
+        def _apply_rope(x, indices, name: str):     # x: [B, S, C_splice] | indices: [B, P]
             compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
-            x = _index_embedding(x, indices).to(compute_uptype)                 # [B, P, C_splice]
+            x = _index_embedding(x, indices).to(compute_uptype)             # [B, P, C_splice]
             params = get_param_for_index(
                 getattr(self, f"{name}_embeddings"), organism_index
-            )                                                                   # [B, 2, T, C_splice]
+            )                                                               # [B, 2, T, C_splice]
             # scale and offset have shape [B, 1, T, C_splice]
-            scale, offset = params[:, [0], :, :], params[:, [1], :, :]          # [B, 1, T, C_splice]
-            x = scale * x[:, :, None, :] + offset                               # [B, P, T, C_splice]
+            scale, offset = params[:, [0], :, :], params[:, [1], :, :]  # [B, 1, T, C_splice]
+            x = scale * x[:, :, None, :] + offset                           # [B, P, T, C_splice]
             x = apply_rope(
-                x, indices, max_position=self._max_position_encoding_distance   # [B, P, T, C_splice]
-            )
-            return x.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
-        
-        splice_site_logits = self.multiorg_linear(x, organism_index)            # [B, S, C_splice]
+                x, indices,
+                max_position=self._max_position_encoding_distance
+            )                                                               # [B, P, T, C_splice]
+            return x.to(compute_uptype)
 
-        pos_accept_logits = _apply_rope(splice_site_logits, pos_accept_idx, "pos_acceptor_logits")      # [B, A, T, C_splice]
-        pos_donor_logits = _apply_rope(splice_site_logits, pos_donor_idx, "pos_donor_logits")           # [B, D, T, C_splice]
-        neg_accept_logits = _apply_rope(splice_site_logits, neg_accept_idx, "neg_acceptor_logits")      # [B, A, T, C_splice]
-        neg_donor_logits = _apply_rope(splice_site_logits, neg_donor_idx, "neg_donor_logits")           # [B, D, T, C_splice]
+        splice_site_logits = self.multiorg_linear(
+            x, organism_index
+        )                                                       # [B, S_local, C_splice] (SP) or [B, S, C_splice]
+        if parallel_context is not None and parallel_context.sp_enabled:
+            splice_site_logits = all_gather(
+                splice_site_logits,
+                dim=1,
+                group=parallel_context.sp_group,
+            )                                                   # [B, S, C_splice]
+
+        # NOTE: Every donor shard pairs with every acceptor, so acceptor RoPE is
+        # repeated on all SP ranks (donor RoPE and the einsums remain sharded)
+        pos_accept_logits = _apply_rope(
+            splice_site_logits, pos_accept_idx,
+            "pos_acceptor_logits"
+        )                                                       # [B, A, T, C_splice]
+        pos_donor_logits = _apply_rope(
+            splice_site_logits, pos_donor_idx,
+            "pos_donor_logits"
+        )                                                       # [B, D_local, T, C_splice]
+        neg_accept_logits = _apply_rope(
+            splice_site_logits, neg_accept_idx,
+            "neg_acceptor_logits"
+        )                                                       # [B, A, T, C_splice]
+        neg_donor_logits = _apply_rope(
+            splice_site_logits, neg_donor_idx,
+            "neg_donor_logits"
+        )                                                       # [B, D_local, T, C_splice]
 
         policy = _ACTIVE_DTYPE_POLICY.get()
 
@@ -1200,31 +1278,34 @@ class SpliceSitesJunctionHead(Head):
 
         pos_mask = (pos_donor_idx >= 0)[:, :, None] & (
             pos_accept_idx >= 0
-        )[:, None, :]                                                           # [B, D, A]
+        )[:, None, :]                                               # [B, D_local, A]
         neg_mask = (neg_donor_idx >= 0)[:, :, None] & (
             neg_accept_idx >= 0
-        )[:, None, :]                                                           # [B, D, A]
+        )[:, None, :]                                               # [B, D_local, A]
         pos_mask = (
             pos_mask[:, :, :, None]
             & track_mask[:, :, :, :self._num_tissues].bool()
-        )                                                                       # [B, D, A, T]
+        )                                                           # [B, D_local, A, T]
         neg_mask = (
             neg_mask[:, :, :, None]
             & track_mask[:, :, :, self._num_tissues:].bool()
-        )                                                                       # [B, D, A, T]
-        
-        splice_junctions_mask = torch.cat([pos_mask, neg_mask], dim=-1)         # [B, D, A, 2*T]
-        pred_counts = torch.cat([pos_counts, neg_counts], dim=-1)               # [B, D, A, 2*T]
-        pred_counts = torch.where(
-            splice_junctions_mask, pred_counts, 0
-        )
+        )                                                           # [B, D_local, A, T]
+
+        splice_junctions_mask = torch.cat(
+            [pos_mask, neg_mask], dim=-1
+        )                                                           # [B, D_local, A, 2*T]
+        pred_counts = torch.cat(
+            [pos_counts, neg_counts], dim=-1
+        )                                                           # [B, D_local, A, 2*T]
+        pred_counts = torch.where(splice_junctions_mask, pred_counts, 0)
         return pred_counts, splice_junctions_mask
-    
+
     def forward(
         self,
         embeddings: embeddings_module.Embeddings,       # (1bp, 128bp, 2048pair)
         organism_index: torch.Tensor,                   # [B]
         tissue_mask: torch.Tensor | None,               # [B, #D, #A, T or 2*T]
+        parallel_context=None,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings."""
@@ -1232,35 +1313,99 @@ class SpliceSitesJunctionHead(Head):
             raise ValueError(
                 'splice_site_positions is required for junctions predictions.'
             )
-        embeddings_1bp = embeddings.get_sequence_embeddings(1)          # [B, S, C]
-        splice_junctions, splice_junction_mask = self._forward(         # both [B, D, A, 2*T]
-           embeddings_1bp, splice_site_positions, 
-           organism_index, tissue_mask
+        if (
+            splice_site_positions.ndim != 3
+            or splice_site_positions.shape[1] != 4
+        ):
+            raise ValueError(
+                "splice_site_positions must have shape [B, 4, P]."
+            )
+
+        embeddings_1bp = embeddings.get_sequence_embeddings(1)  # [B, S_local, C_0] (SP) or [B, S, C_0]
+        S_local = embeddings_1bp.shape[1]
+        global_length = (
+            S_local * parallel_context.sp_size
+            if parallel_context is not None and parallel_context.sp_enabled
+            else S_local
+        )
+
+        # Max-reduce so every rank raises if any rank sees an invalid position.
+        invalid_position = torch.any(
+            (splice_site_positions < -1)
+            | (splice_site_positions >= global_length)
+        ).to(torch.int32)
+        if parallel_context is not None and parallel_context.sp_enabled:
+            dist.all_reduce(
+                invalid_position,
+                op=dist.ReduceOp.MAX,
+                group=parallel_context.sp_group,
+            )
+        if invalid_position.item():
+            raise ValueError(
+                "splice_site_positions values must be -1 for padding "
+                f"or between 0 and {global_length - 1}."
+            )
+
+        splice_junctions, splice_junction_mask = self._forward(  # both [B, D_local, A, 2*T]
+            embeddings_1bp,
+            splice_site_positions,
+            organism_index,
+            tissue_mask,
+            parallel_context=parallel_context,
         )
         return {
-           'predictions': splice_junctions,                             # [B, D, A, 2*T]
-           'splice_site_positions': splice_site_positions,              # [B, 4, P]
-           'splice_junction_mask': splice_junction_mask                 # [B, D, A, 2*T]
+            'predictions': splice_junctions,                    # [B, D_local, A, 2*T]
+            'splice_site_positions': splice_site_positions,     # [B, 4, P]
+            'splice_junction_mask': splice_junction_mask,       # [B, D_local, A, 2*T]
         }
-    
+
     def loss(
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (count_target := batch.splice_junctions) is None:
             raise ValueError('splice_junctions target not in batch.')
 
-        pred_pair = predictions['predictions']
-        pairs_mask = predictions['splice_junction_mask']
+        pred_pair = predictions['predictions']                  # [B, D_local, A, 2*T]
+        pairs_mask = predictions['splice_junction_mask']        # [B, D_local, A, 2*T]
+        sequence_group = None
+        donor_start = donor_end = None
+        if parallel_context is not None and parallel_context.sp_enabled:
+            num_donors = predictions['splice_site_positions'].shape[2]
+            if count_target.shape[1] != num_donors:
+                raise ValueError(
+                    "splice_junctions donor rows must match "
+                    "splice_site_positions."
+                )
+            donor_start, donor_end = parallel_context.sp_bounds(
+                num_donors
+            )
+            count_target = count_target[:, donor_start:donor_end]
+            sequence_group = parallel_context.sp_group
+
+        if count_target.shape != pred_pair.shape:
+            raise ValueError(
+                "splice_junctions target shape "
+                f"{tuple(count_target.shape)} must match prediction shape "
+                f"{tuple(pred_pair.shape)}."
+            )
+
         if batch.splice_junctions_mask is not None:
             mask = self._normalize_junction_mask(batch.splice_junctions_mask)
+            if (
+                parallel_context is not None
+                and parallel_context.sp_enabled
+                and mask.shape[1] > 1
+            ):
+                assert donor_start is not None and donor_end is not None
+                mask = mask[:, donor_start:donor_end]
             pairs_mask = pairs_mask.to(torch.bool) & mask.to(
                 device=pairs_mask.device,
                 dtype=torch.bool,
             )
-        # Junctions shape is [B, D, A, 2*T]
 
         def _scale_junction_counts(counts):     # [B, D, A, 2*T]
             return torch.where(
@@ -1268,29 +1413,52 @@ class SpliceSitesJunctionHead(Head):
                 2.0 * torch.sqrt(counts * _SOFT_CLIP_VALUE) - _SOFT_CLIP_VALUE,
                 counts,
             )
-        
+
         pairs_mask = pairs_mask.to(torch.bool)
+        dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+
+        accept_true = _scale_junction_counts(
+            count_target.masked_fill(~pairs_mask, 0.0).sum(
+                dim=-2, dtype=dtype
+            )
+        )                                                           # [B, D_local, 2*T]
+        accept_pred = pred_pair.masked_fill(~pairs_mask, 0.0).sum(
+            dim=-2, dtype=dtype
+        )                                                           # [B, D_local, 2*T]
         accept_total_loss = losses.poisson_loss(
-            y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
-            ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-2, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
-            mask=(pairs_mask.any(dim=-2)),
-        )
-        donor_total_loss = losses.poisson_loss(
-            y_true=_scale_junction_counts(
-               (count_target.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype)
-            ),
-            y_pred=(pred_pair.masked_fill(~pairs_mask, 0.0)).sum(dim=-3, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype),
-            mask=(pairs_mask.any(dim=-3)),
+            y_true=accept_true,
+            y_pred=accept_pred,
+            mask=pairs_mask.any(dim=-2),
         )
 
-        # Ratios with cross entropy loss
+        donor_true = count_target.masked_fill(~pairs_mask, 0.0).sum(
+            dim=-3, dtype=dtype
+        )                                                           # [B, A, 2*T]
+        donor_pred = pred_pair.masked_fill(~pairs_mask, 0.0).sum(
+            dim=-3, dtype=dtype
+        )                                                           # [B, A, 2*T]
+        donor_mask = pairs_mask.any(dim=-3)                         # [B, A, 2*T]
+        if sequence_group is not None:
+            donor_true = dist_sum(donor_true, group=sequence_group)
+            donor_pred = dist_sum(donor_pred, group=sequence_group)
+            donor_mask = dist_sum(
+                donor_mask.to(dtype), group=sequence_group
+            ).bool()
+        # NOTE: Under SP, the donor axis is now globally reduced, so this smaller
+        # [B, A, 2T] loss is computed identically on every rank.
+        donor_total_loss = losses.poisson_loss(
+            y_true=_scale_junction_counts(donor_true),
+            y_pred=donor_pred,
+            mask=donor_mask,
+        )
+
+        # Ratios with cross-entropy loss
         donor_ratios_loss = losses.cross_entropy_loss(
             y_true=count_target,
             y_pred=pred_pair,
             mask=pairs_mask,
             axis=-3,
+            axis_group=sequence_group,
         )
         acceptor_ratios_loss = losses.cross_entropy_loss(
             y_true=count_target,
@@ -1298,25 +1466,24 @@ class SpliceSitesJunctionHead(Head):
             mask=pairs_mask,
             axis=-2,
         )
+
         return {
             'ratios': {
-                'acceptor': losses.LossLeaf(
-                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * acceptor_ratios_loss
+                'acceptor': acceptor_ratios_loss.scaled(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
                 ),
-                'donor': losses.LossLeaf(
-                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT * donor_ratios_loss
+                'donor': donor_ratios_loss.scaled(
+                    _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
                 ),
             },
             'total_counts': {
-                'acceptor': losses.LossLeaf(
+                'acceptor': accept_total_loss.scaled(
                     _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
                     * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
-                    * accept_total_loss
                 ),
-                'donor': losses.LossLeaf(
+                'donor': donor_total_loss.scaled(
                     _SPLICE_JUNCTION_HEAD_LOSS_WEIGHT
                     * _SPLICE_JUNCTION_TOTAL_COUNT_LOSS_WEIGHT
-                    * donor_total_loss
                 ),
             },
         }
@@ -1371,21 +1538,23 @@ class MaskedLanguageModelingHead(Head):
         self,
         predictions: dict[str, torch.Tensor],
         batch: schemas.DataBatch,
+        parallel_context=None,
     ) -> dict[str, losses.MetricNode]:
         """Returns the loss for the head."""
         if (labels := batch.mlm) is None:
             raise ValueError('masked_lm_labels target not in batch.')
-        
+        if parallel_context is not None and parallel_context.sp_enabled:
+            labels = parallel_context.sp_shard(labels, dim=1)
+
         logits = predictions['logits']
         assert labels.shape == logits.shape[:-1], \
             'Predictions shape does not match targets shape.'
         
-        loss = F.cross_entropy(
-            logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype).view(-1, logits.size(-1)),
-            labels.view(-1),
-            reduction='mean',
+        loss = losses.sparse_cross_entropy_loss_from_logits(
+            y_pred_logits=logits,
+            y_true=labels,
         )
         return {
-            'cross_entropy': losses.LossLeaf(loss),
+            'cross_entropy': loss,
         }
     
