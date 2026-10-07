@@ -71,6 +71,22 @@ html[data-theme="dark"] {
   z-index: 2;
 }
 
+/* Keep output names compact and tensor shapes readable on one line. */
+.sp-output-shapes :is(th, td):first-child {
+  min-width: 11rem;
+  max-width: 12rem;
+  overflow-wrap: anywhere;
+}
+
+.sp-output-shapes td:first-child :is(code, .pre) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sp-output-shapes :is(th, td):nth-child(n + 3) {
+  white-space: nowrap;
+}
+
 /* Keep heading permalinks without leaving a persistent target highlight. */
 .bd-main .bd-content .bd-article-container .bd-article
   :target > :is(h1, h2, h3, h4, h5) {

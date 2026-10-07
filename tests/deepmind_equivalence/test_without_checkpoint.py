@@ -448,7 +448,7 @@ def test_mse_loss(
             y_true=_torch_array(targets, pt_dtype_policy.compute_dtype),
             y_pred=_torch_array(predictions, pt_dtype_policy.compute_dtype),
             mask=torch.from_numpy(mask),
-        )
+        ).value
     jax_output = jax_losses.mse(
         y_true=_jax_array(targets, pt_dtype_policy.compute_dtype),
         y_pred=_jax_array(predictions, pt_dtype_policy.compute_dtype),
@@ -474,7 +474,7 @@ def test_poisson_loss(
             y_true=_torch_array(targets, pt_dtype_policy.compute_dtype),
             y_pred=_torch_array(predictions, pt_dtype_policy.compute_dtype),
             mask=torch.from_numpy(mask),
-        )
+        ).value
     jax_output = jax_losses.poisson_loss(
         y_true=_jax_array(targets, pt_dtype_policy.compute_dtype),
         y_pred=_jax_array(predictions, pt_dtype_policy.compute_dtype),
@@ -514,8 +514,13 @@ def test_multinomial_loss(
         positional_weight=positional_weight,
     )
     for name in ("loss", "loss_total", "loss_positional"):
+        torch_value = (
+            torch_output[name].value
+            if isinstance(torch_output[name], torch_losses.LossLeaf)
+            else torch_output[name]
+        )
         record_and_assert_close(
-            torch_output[name],
+            torch_value,
             jax_output[name],
             name=name,
             dtype_policy=pt_dtype_policy.name,
@@ -541,7 +546,7 @@ def test_cross_entropy_from_logits(
             y_true=_torch_array(targets, pt_dtype_policy.compute_dtype),
             mask=torch.from_numpy(mask),
             axis=-1,
-        )
+        ).value
     jax_output = jax_losses.cross_entropy_loss_from_logits(
         y_pred_logits=_jax_array(logits, pt_dtype_policy.compute_dtype),
         y_true=_jax_array(targets, pt_dtype_policy.compute_dtype),
@@ -568,7 +573,7 @@ def test_binary_cross_entropy_from_logits(
             y_pred=_torch_array(logits, pt_dtype_policy.compute_dtype),
             y_true=_torch_array(targets, pt_dtype_policy.compute_dtype),
             mask=torch.from_numpy(mask),
-        )
+        ).value
     jax_output = jax_losses.binary_crossentropy_from_logits(
         y_pred=_jax_array(logits, pt_dtype_policy.compute_dtype),
         y_true=_jax_array(targets, pt_dtype_policy.compute_dtype),
@@ -595,7 +600,7 @@ def test_cross_entropy_on_counts(
             y_pred=_torch_array(predictions, pt_dtype_policy.compute_dtype),
             mask=torch.from_numpy(mask),
             axis=1,
-        )
+        ).value
     jax_output = jax_losses.cross_entropy_loss(
         y_true=_jax_array(targets, pt_dtype_policy.compute_dtype),
         y_pred=_jax_array(predictions, pt_dtype_policy.compute_dtype),

@@ -8,16 +8,31 @@ from alphagenome_pt import LossLeaf, MetricTree
 
 
 ##### LEAF TESTS #####
-def test_loss_leaf_accepts_float_and_tensor():
+def test_loss_leaf_accepts_statistics_and_scales_numerator():
     assert torch.equal(LossLeaf(1.5).value, torch.tensor(1.5))
+    assert torch.equal(LossLeaf(3, 2).value, torch.tensor(1.5))
 
-    value = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
-    assert LossLeaf(value).value is value
+    numerator = torch.tensor(12.0, dtype=torch.float64, requires_grad=True)
+    leaf = LossLeaf(numerator, 3)
+    assert leaf.numerator is numerator
+    assert torch.equal(leaf.denominator, torch.tensor(3.0, dtype=torch.float64))
+    assert torch.equal(leaf.value, torch.tensor(4.0, dtype=torch.float64))
+
+    scaled = leaf.scaled(2.0)
+    assert torch.equal(scaled.numerator, torch.tensor(24.0, dtype=torch.float64))
+    assert torch.equal(scaled.denominator, leaf.denominator)
+    assert torch.equal(scaled.value, torch.tensor(8.0, dtype=torch.float64))
+
+
+def test_loss_leaf_zero_denominator_has_zero_value():
+    leaf = LossLeaf(0.0, 0.0)
+    assert torch.equal(leaf.value, torch.tensor(0.0))
+    assert torch.isfinite(leaf.value)
 
 
 def test_loss_leaf_rejects_invalid_values():
-    with pytest.raises(TypeError, match="torch.Tensor or float"):
-        LossLeaf(1)
+    with pytest.raises(TypeError, match="torch.Tensor, float, or int"):
+        LossLeaf("1")
     for dtype in (torch.int64, torch.bool, torch.complex64):
         with pytest.raises(TypeError, match="floating point"):
             LossLeaf(torch.tensor(1, dtype=dtype))
@@ -90,7 +105,8 @@ def test_metric_tree_to_dict_preserves_hierarchy_and_tensors():
     rna_values = values["rna_seq"]
     assert isinstance(rna_values, dict)
     assert list(rna_values) == ["first", "second"]
-    assert rna_values["first"] is first
+    assert torch.equal(rna_values["first"], first)
+    assert rna_values["first"].requires_grad
     assert values is not tree.children
     assert rna_values is not tree.children["rna_seq"]
 
@@ -150,8 +166,12 @@ def test_metric_tree_add_detaches_by_default_and_can_preserve_gradients():
     c2 = 1.5
     left_value = torch.tensor(1.0, requires_grad=True)
     right_value = torch.tensor(2.0, requires_grad=True)
-    left = MetricTree({"head": {"term": LossLeaf(c1 * left_value)}})
-    right = MetricTree({"head": {"term": LossLeaf(c2 * right_value)}})
+    left = MetricTree({
+        "head": {"term": LossLeaf(c1 * left_value, 1.0)}
+    })
+    right = MetricTree({
+        "head": {"term": LossLeaf(c2 * right_value, 3.0)}
+    })
 
     detached = left.add(right)
     assert not detached.total_loss().requires_grad
@@ -162,8 +182,8 @@ def test_metric_tree_add_detaches_by_default_and_can_preserve_gradients():
     attached = left.add(right, detach=False)
     attached.total_loss().backward()
 
-    assert torch.equal(left_value.grad, torch.tensor(c1))
-    assert torch.equal(right_value.grad, torch.tensor(c2))
+    assert torch.equal(left_value.grad, torch.tensor(c1 / 4.0))
+    assert torch.equal(right_value.grad, torch.tensor(c2 / 4.0))
 
 
 def test_metric_tree_add_returns_new_children():
@@ -344,10 +364,10 @@ def test_metric_tree_loss_totals():
         )
 
 
-def test_metric_tree_add_returns_matching_sum():
+def test_metric_tree_add_returns_weighted_mean():
     left_scale = 1.5
     right_scale = 2.5
-    total_scale = left_scale + right_scale
+    combined_scale = (left_scale + right_scale) / 2.0
     left = _all_head_metric_tree(scale=left_scale)
     right = _all_head_metric_tree(scale=right_scale)
 
@@ -367,7 +387,7 @@ def test_metric_tree_add_returns_matching_sum():
             right.total_loss(*prefix),
             torch.tensor(expected_right),
         )
-        expected_total = total_scale * expected_base
+        expected_total = combined_scale * expected_base
         torch.testing.assert_close(
             result.total_loss(*prefix),
             torch.tensor(expected_total),

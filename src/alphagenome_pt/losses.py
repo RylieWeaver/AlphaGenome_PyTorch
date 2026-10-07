@@ -3,36 +3,78 @@
 
 # External
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import TypeAlias
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from einops import rearrange, reduce
 
 # Internal
+from .distributed import dist_sum
 from .precision import _ACTIVE_DTYPE_POLICY
+from .utils import _register_pytree_dataclass
 
 
+# NOTE: Dataclass fields let FSDP attach backward hooks to leaf tensors; pytree
+# registration lets DDP wrap them when backward uses the returned tree.
 
+
+@_register_pytree_dataclass
+@dataclass(init=False, eq=False)
 class LossLeaf:
-    """
-    Later we'll add numerator and denominator to this leaf so that we can
-    calculate a true global mean across distributed processes. For now, it's
-    a simple wrapper around a scalar tensor.
-    """
-    def __init__(self, value: torch.Tensor | float):
-        if isinstance(value, float):
-            value = torch.tensor(value)
-        if not isinstance(value, torch.Tensor):
-            raise TypeError("LossLeaf value must be a torch.Tensor or float.")
-        if not value.is_floating_point():
-            raise TypeError("LossLeaf value must be floating point.")
-        if value.ndim != 0:
-            raise ValueError("LossLeaf value must be a scalar tensor.")
-        self._value = value
+    """Additive numerator and denominator for one mean loss term."""
+
+    numerator: torch.Tensor
+    denominator: torch.Tensor
+
+    def __init__(
+        self,
+        numerator: torch.Tensor | float | int,
+        denominator: torch.Tensor | float | int = 1.0,
+    ) -> None:
+        if isinstance(numerator, (float, int)):
+            numerator = torch.tensor(numerator, dtype=torch.get_default_dtype())
+        if not isinstance(numerator, torch.Tensor):
+            raise TypeError(
+                "LossLeaf numerator must be a torch.Tensor, float, or int."
+            )
+        denominator = torch.as_tensor(
+            denominator,
+            dtype=numerator.dtype,
+            device=numerator.device,
+        ).detach()
+
+        for name, value in (("numerator", numerator), ("denominator", denominator)):
+            if not value.is_floating_point():
+                raise TypeError(f"LossLeaf {name} must be floating point.")
+            if value.ndim != 0:
+                raise ValueError(f"LossLeaf {name} must be a scalar tensor.")
+
+        self.numerator = numerator
+        self.denominator = denominator
 
     @property
     def value(self) -> torch.Tensor:
-        return self._value
+        # NOTE: Denominator is a single value, but we still use torch.where
+        # to avoid GPU-to-CPU synchronization from a Python if and return
+        # zero for empty losses without dividing by zero.
+        has_values = self.denominator > 0
+        safe_denominator = torch.where(
+            has_values,
+            self.denominator,
+            torch.ones_like(self.denominator),
+        )
+        value = torch.where(
+            has_values,
+            self.numerator / safe_denominator,
+            torch.zeros_like(self.numerator),
+        )
+        return value
+
+    def scaled(self, weight: torch.Tensor | float) -> "LossLeaf":
+        # How to apply loss weighting in this numerator/denominator regime
+        return LossLeaf(self.numerator * weight, self.denominator)
 
     def add(
         self,
@@ -40,15 +82,31 @@ class LossLeaf:
         *,
         detach: bool = True,
     ) -> "LossLeaf":
-        """Return a leaf containing the sum of two leaf values."""
+        """Combine statistics for two loss leaves."""
         if not isinstance(other, LossLeaf):
             raise TypeError("LossLeaf can only be added to another LossLeaf.")
-        left = self.value.detach() if detach else self.value
-        right = other.value.detach() if detach else other.value
-        return LossLeaf(left + right)
+        left_numerator = (
+            self.numerator.detach() if detach else self.numerator
+        )
+        right_numerator = (
+            other.numerator.detach() if detach else other.numerator
+        )
+        left_denominator = (
+            self.denominator.detach() if detach else self.denominator
+        )
+        right_denominator = (
+            other.denominator.detach() if detach else other.denominator
+        )
+        return LossLeaf(
+            left_numerator + right_numerator,
+            left_denominator + right_denominator,
+        )
 
     def detach(self) -> "LossLeaf":
-        return LossLeaf(self.value.detach())
+        return LossLeaf(
+            self.numerator.detach(),
+            self.denominator.detach(),
+        )
 
 
 MetricPath: TypeAlias = tuple[str, ...]
@@ -57,6 +115,8 @@ MetricDict: TypeAlias = dict[str, "MetricDictNode"]
 MetricDictNode: TypeAlias = torch.Tensor | MetricDict
 
 
+@_register_pytree_dataclass
+@dataclass(init=False, eq=False)
 class MetricTree:
     """
     A nested tree of model metrics, currently limited to loss leaves.
@@ -68,6 +128,8 @@ class MetricTree:
     targets contribute to a leaf, its value should be a scalar zero tensor
     rather than omitting the leaf.
     """
+
+    children: dict[str, MetricNode]
 
     def __init__(self, children: Mapping[str, MetricNode]):
         if not isinstance(children, Mapping):
@@ -217,6 +279,35 @@ class MetricTree:
             )
         )
 
+    def distributed_reduce(self, group=None) -> "MetricTree":
+        leaves = dict(self.iter_leaves())
+        numerators = torch.stack([leaf.numerator for leaf in leaves.values()])
+        denominators = torch.stack([leaf.denominator for leaf in leaves.values()])
+        numerators = dist_sum(numerators, group=group)
+        denominators = dist_sum(denominators, group=group)
+
+        replacements = {
+            path: LossLeaf(numerator, denominator)
+            # NOTE: tensor.unbind() splits among dim 0
+            for path, numerator, denominator in zip(
+                leaves.keys(),
+                numerators.unbind(),
+                denominators.unbind(),
+                strict=True,
+            )
+        }
+
+        # NOTE: This code may look complicated but basically just 
+        # takes flattened paths to a tree structure for the dict
+        children = {}
+        for path, leaf in replacements.items():
+            branch = children
+            for name in path[:-1]:
+                branch = branch.setdefault(name, {})
+            branch[path[-1]] = leaf
+        
+        return MetricTree(children)
+
     def total_loss(self, *prefix: str) -> torch.Tensor:
         """Return the summed loss, possibly within prefix."""
         node: MetricNode = self.children
@@ -247,8 +338,8 @@ class MetricTree:
 def _safe_masked_mean(
     x: torch.Tensor,                        # [*]
     mask: torch.Tensor | None = None,       # [#*]
-    ) -> torch.Tensor:
-    """Safe torch.mean that handles completely masked arrays."""
+) -> LossLeaf:
+    """Return additive statistics for a safe masked mean."""
     if mask is None:
         masked = x
         mask = torch.ones_like(x, dtype=x.dtype)
@@ -257,7 +348,10 @@ def _safe_masked_mean(
         mask = mask.to(x.dtype)
         masked = x * mask
 
-    return torch.sum(masked, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype) / torch.clamp(torch.sum(mask, dtype=_ACTIVE_DTYPE_POLICY.get().compute_uptype), min=1.0)
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+    total = torch.sum(masked, dtype=dtype)
+    count = torch.sum(mask, dtype=dtype)
+    return LossLeaf(total, count)
 
 
 def poisson_loss(
@@ -265,10 +359,11 @@ def poisson_loss(
     y_true: torch.Tensor,                   # [*]
     y_pred: torch.Tensor,                   # [*]
     mask: torch.Tensor | None = None,       # [#*]
-) -> torch.Tensor:
+) -> LossLeaf:
     """Poisson loss with fixed dtype and shift to have min_loss = 0."""
-    y_true = torch.abs(y_true).to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
-    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+    compute_uptype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+    y_true = torch.abs(y_true).to(compute_uptype)
+    y_pred = y_pred.to(compute_uptype)
     y_pred_logits = torch.log(y_pred + 1e-7)
     # Substract the minimum value such that loss is zero at optimal prediction.
     min_value = y_true - y_true * torch.log(y_true + 1e-7)
@@ -281,66 +376,142 @@ def multinomial_loss(
     y_true: torch.Tensor,                   # [..., S, C]
     y_pred: torch.Tensor,                   # [..., S, C]
     mask: torch.Tensor,                     # [..., #S, C]
-    multinomial_resolution: int,
+    multinomial_resolution: int | None = None,
     positional_weight: float,
     min_zero: bool = True,
     eps: float = 1e-7,
-) -> dict[str, torch.Tensor]:
-    """Returns sum of multinomial losses and Poison loss on total count."""
-    assert y_true.shape == y_pred.shape, "Shapes of y_true, y_pred and mask must be equal."
-    if y_pred.shape[-2] % multinomial_resolution != 0:
+    sequence_group=None,
+) -> dict[str, torch.Tensor | LossLeaf]:
+    """Return count and positional losses over multinomial windows.
+
+    Under sequence parallelism, ``multinomial_resolution`` must divide the
+    local sequence length, or be a multiple of it that divides the global
+    sequence length.
+    """
+    assert y_true.shape == y_pred.shape, (
+        "Shapes of y_true and y_pred must be equal."
+    )
+
+    local_sequence_length = y_pred.shape[-2]
+    sp_size = (
+        dist.get_world_size(sequence_group)
+        if sequence_group is not None
+        else 1
+    )
+    global_sequence_length = local_sequence_length * sp_size
+
+    # NOTE: This default keeps SP and non-SP behavior equivalent.
+    if multinomial_resolution is None:
+        multinomial_resolution = global_sequence_length
+
+    if multinomial_resolution <= 0:
         raise ValueError(
-            f'{y_pred.shape[-2]=} must be divisible by {multinomial_resolution=}.'
+            "multinomial_resolution must be positive, got "
+            f"{multinomial_resolution}."
+        )
+    elif (
+        multinomial_resolution <= local_sequence_length
+        and local_sequence_length % multinomial_resolution != 0
+    ):
+        raise ValueError(
+            f"{local_sequence_length=} must be divisible by "
+            f"{multinomial_resolution=}."
+        )
+    elif multinomial_resolution > local_sequence_length and (
+        sequence_group is None
+        or multinomial_resolution % local_sequence_length != 0
+        or global_sequence_length % multinomial_resolution != 0
+    ):
+        raise ValueError(
+            "A multinomial_resolution larger than local_sequence_length "
+            "requires sequence parallelism and must be a multiple of "
+            "local_sequence_length that divides global_sequence_length."
         )
 
+    multi_rank_windows = multinomial_resolution > local_sequence_length
+
     # Setup
-    *extra_dims, S, C = y_pred.shape
-    S_sub = multinomial_resolution
     dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
     y_true = y_true.to(dtype)
     y_pred = y_pred.to(dtype)
     mask = mask.to(dtype)
 
-    # Remove the masked out bins from the totals sum
-    y_true = torch.clamp(y_true, min=0) * mask                                  # [..., S, C]
-    y_pred = y_pred * mask                                                      # [..., S, C]
+    # Remove masked bins before computing count totals and probabilities
+    y_true = torch.clamp(y_true, min=0) * mask
+    y_pred = y_pred * mask
 
-    # Split sequence into n sub-sequences of size multinomial_resolution
-    y_pred = rearrange(y_pred, '... (n s) c -> ... n s c', s=S_sub)     # [..., S_sub, R, C]
-    y_true = rearrange(y_true, '... (n s) c -> ... n s c', s=S_sub)     # [..., S_sub, R, C]
+    # A multi-rank window uses each whole local shard as one contribution
+    local_window_size = min(
+        multinomial_resolution, local_sequence_length
+    )
+    y_pred = rearrange(
+        y_pred, "... (n s) c -> ... n s c",
+        s=local_window_size,
+    )
+    y_true = rearrange(
+        y_true, "... (n s) c -> ... n s c",
+        s=local_window_size,
+    )
+    total_pred = reduce(y_pred, "... n s c -> ... n 1 c", "sum")        # [..., S_sub, 1, C]
+    total_true = reduce(y_true, "... n s c -> ... n 1 c", "sum")        # [..., S_sub, 1, C]
 
-    # Pooled pred/true counts
-    total_pred = reduce(y_pred, '... n s c -> ... n 1 c', 'sum')        # [..., S_sub, 1, C]
-    total_true = reduce(y_true, '... n s c -> ... n 1 c', 'sum')        # [..., S_sub, 1, C]
-    mask = mask[..., None, :]  # broadcast over segments
+    if multi_rank_windows:
+        K = multinomial_resolution // local_sequence_length             # SP ranks per window
+        total_pred = dist_sum(
+            total_pred,
+            group=sequence_group,
+            ranks_per_subgroup=K,
+        )                                                               # [B, 1, 1, C]
+        total_true = dist_sum(
+            total_true,
+            group=sequence_group,
+            ranks_per_subgroup=K,
+        )                                                               # [B, 1, 1, C]
+    mask = mask[..., None, :]                                           # [..., #S, C] -> [..., #S, 1, C]
 
-    # Poisson loss
+    # NOTE: For multi-rank windows, the small count loss is repeated on K
+    # ranks. Divide both statistics by K so each window is counted once,
+    # including when different DP sequence lengths give different values of K.
     loss_total_count = poisson_loss(
         y_pred=total_pred,
         y_true=total_true,
         mask=mask,
     )
-    ## NOTE: Poisson loss is O(n) wrt resolution so
-    ## we normalize to be invariant to resolution
-    loss_total_count /= multinomial_resolution
+    if multi_rank_windows:
+        loss_total_count = LossLeaf(
+            loss_total_count.numerator / K,
+            loss_total_count.denominator / K,
+        )
+    # Poisson loss is O(n) with respect to resolution, so normalize it to
+    # remain invariant to resolution.
+    loss_total_count = loss_total_count.scaled(
+        1.0 / multinomial_resolution
+    )
 
     # Positional loss
-    prob_predictions = y_pred / (total_pred + eps)                          # [..., N, R, C]
-    loss_pos = -y_true * torch.log(prob_predictions + eps)                  # [..., N, R, C]
-    # NOTE: positional loss has a min value that we can account for
-    prob_targets = y_true / (total_true + eps)                              # [..., N, 1, C]
-    min_value = -y_true * torch.log(prob_targets + eps)                     # [..., N, R, C]
-    zero_loss_pos = loss_pos - min_value                                    # [..., N, R, C]
+    prob_predictions = y_pred / (total_pred + eps)              # [..., N_local, R_local, C]
+    loss_pos = -y_true * torch.log(prob_predictions + eps)      # [..., N_local, R_local, C]
 
-    loss_pos = _safe_masked_mean(loss_pos, mask)                  # [1]
-    zero_loss_pos = _safe_masked_mean(zero_loss_pos, mask)        # [1]
+    # NOTE: Positional loss has a minimum value that we can account for.
+    prob_targets = y_true / (total_true + eps)                  # [..., N_local, R_local, C]
+    min_value = -y_true * torch.log(prob_targets + eps)         # [..., N_local, R_local, C]
+    zero_loss_pos = loss_pos - min_value                        # [..., N_local, R_local, C]
+
+    loss_pos = _safe_masked_mean(loss_pos, mask)               # LossLeaf
+    zero_loss_pos = _safe_masked_mean(
+        zero_loss_pos, mask
+    )                                                           # LossLeaf
     loss = zero_loss_pos if min_zero else loss_pos
-    
+
     return {
-        'loss': loss_total_count + positional_weight * loss,
-        'loss_total': loss_total_count,
-        'loss_positional': loss_pos,
-        'zero_loss_positional': zero_loss_pos,
+        # Composite convenience value for serial callers. Distributed model
+        # training reduces the independently normalized component leaves.
+        "loss": (
+            loss_total_count.value + positional_weight * loss.value
+        ),
+        "loss_total": loss_total_count,
+        "loss_positional": loss_pos,
+        "zero_loss_positional": zero_loss_pos,
     }
 
 
@@ -348,7 +519,7 @@ def mse(
     y_pred: torch.Tensor,                   # [*]
     y_true: torch.Tensor,                   # [*]
     mask: torch.Tensor | None = None,       # [*]
-) -> torch.Tensor:
+) -> LossLeaf:
     """Mean squared error."""
     return _safe_masked_mean(torch.square(y_pred - y_true), mask)
 
@@ -359,15 +530,40 @@ def cross_entropy_loss_from_logits(
     y_true: torch.Tensor,                   # [*]
     mask: torch.Tensor | None = None,       # [#*]
     axis: int,
-) -> torch.Tensor:
-    """Cross-entropy loss from logits."""
+) -> LossLeaf:
+    """Cross-entropy loss from one-hot targets."""
     log_softmax_preds = F.log_softmax(
         y_pred_logits.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype), dim=axis
     )
-    loss = -torch.sum(y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) * log_softmax_preds, dim=axis)
+    loss = -torch.sum(
+        y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype)
+        * log_softmax_preds,
+        dim=axis,
+    )
     if mask is not None:
         mask = torch.any(mask, dim=axis)
     return _safe_masked_mean(loss, mask)
+
+
+def sparse_cross_entropy_loss_from_logits(
+    *,
+    y_pred_logits: torch.Tensor,            # [..., C]
+    y_true: torch.Tensor,                   # [...]
+    ignore_index: int = -100,
+) -> LossLeaf:
+    """Cross-entropy loss from integer labels."""
+    labels = y_true.reshape(-1)
+    per_item_loss = F.cross_entropy(
+        y_pred_logits.to(
+            _ACTIVE_DTYPE_POLICY.get().compute_uptype
+        ).reshape(-1, y_pred_logits.shape[-1]),
+        labels,
+        reduction="none",
+        ignore_index=ignore_index,
+    )
+    return _safe_masked_mean(
+        per_item_loss, labels != ignore_index
+    )
 
 
 def binary_crossentropy_from_logits(
@@ -375,7 +571,7 @@ def binary_crossentropy_from_logits(
     y_true: torch.Tensor,                   # [*]
     y_pred: torch.Tensor,                   # [*]
     mask: torch.Tensor | None = None,       # [#*]
-) -> torch.Tensor:
+) -> LossLeaf:
     """Binary cross-entropy loss from sigmoid logits."""
     loss = (
         torch.max(y_pred, torch.zeros_like(y_pred))
@@ -392,18 +588,40 @@ def cross_entropy_loss(
     mask: torch.Tensor | None = None,       # [#*]
     axis: int,
     eps: float = 1e-7,
-) -> torch.Tensor:
-    """Cross entropy loss on counts."""
+    axis_group=None,
+) -> LossLeaf:
+    """Cross entropy loss on counts, with an optionally sharded axis.
+
+    ``axis_group`` combines sufficient statistics when ``axis`` is sharded.
+    """
     if mask is None:
         mask = torch.ones_like(y_true, dtype=torch.bool)
     else:
         mask = mask.expand_as(y_true).to(torch.bool)
 
-    y_true = y_true.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
-    y_pred = y_pred.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype) + eps
+    # Setup
+    dtype = _ACTIVE_DTYPE_POLICY.get().compute_uptype
+    y_true = y_true.to(dtype) + eps
+    y_pred = y_pred.to(dtype) + eps
     axis_mask = mask.any(dim=axis, keepdim=True)
+    if axis_group is not None:
+        axis_mask = dist_sum(
+            axis_mask.to(dtype), group=axis_group
+        ).bool()
     mask = torch.where(axis_mask, mask, True)
-    p_true = y_true / y_true.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
-    p_pred = y_pred / y_pred.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+
+    total_true = y_true.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    total_pred = y_pred.masked_fill(~mask, 0).sum(dim=axis, keepdim=True)
+    if axis_group is not None:
+        total_true = dist_sum(total_true, group=axis_group)
+        total_pred = dist_sum(total_pred, group=axis_group)
+
+    p_true = y_true / total_true
+    p_pred = y_pred / total_pred
     log_loss = (-p_true * torch.log(p_pred)).masked_fill(~mask, 0).sum(dim=axis)
-    return _safe_masked_mean(log_loss, axis_mask.squeeze(dim=axis))
+    if axis_group is not None:
+        log_loss = dist_sum(log_loss, group=axis_group)
+    return _safe_masked_mean(
+        log_loss,
+        axis_mask.squeeze(dim=axis),
+    )

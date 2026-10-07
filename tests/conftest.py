@@ -1,4 +1,6 @@
 # External
+import os
+import sys
 from pathlib import Path
 import pytest
 import torch
@@ -8,6 +10,40 @@ from alphagenome_pt import HeadName, small_alphagenome, synthetic_metadata
 from .deepmind_equivalence.precision import EQUIVALENCE_TEST_POLICIES
 
 from .helpers import DNA_SEQUENCE
+
+
+def pytest_exception_interact(node, report):
+    """
+    Let torchrun stop all peers when a parallelism test fails on one rank.
+    
+    NOTE: "pytest_exception_interact" is a recognized pytest hook name,
+    which is how this is caught and activated.
+    """
+    if (
+        node.path.name != "test_parallelism.py"
+        or "TORCHELASTIC_RUN_ID" not in os.environ
+        or not report.failed
+    ):
+        return
+
+    # NOTE: Pytest normally catches failures and keeps the worker alive. We want
+    # to exit before teardown because destroying process groups can hang while peers
+    # wait in collectives. Torchrun observes this failed worker and stops the others.
+    #
+    # Related hard-exit patterns:
+    # - pytest-timeout's timeout_timer: dump diagnostics, flush, then os._exit(1).
+    #   https://github.com/pytest-dev/pytest-timeout/blob/2.3.1/pytest_timeout.py
+    # - vLLM's subprocess-test helper discussion: print traceback, then os._exit(1).
+    #   https://github.com/vllm-project/vllm/issues/7053
+    # Torchrun stops the other workers when one fails:
+    # https://docs.pytorch.org/docs/stable/elastic/run.html#failure-modes
+    print(
+        f"\n[rank {os.environ['RANK']}] {report.nodeid}\n{report.longreprtext}",
+        file=sys.stderr,
+        flush=True,
+    )
+    sys.stdout.flush()
+    os._exit(1)
 
 
 def pytest_addoption(parser):

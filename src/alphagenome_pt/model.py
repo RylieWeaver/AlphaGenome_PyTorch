@@ -20,6 +20,7 @@ from .schemas import Channels, DataBatch, ModelInput, OrganismIndex
 from .metadata import Metadata
 from .convolutions import DNAEmbedder, DownResBlock, UpResBlock
 from .attention import TransformerTowerBlock
+from .layers import BatchNorm
 from .embeddings import Embeddings, OutputEmbedder, OutputPairEmbedder
 from .heads import create_heads, HeadName
 from .losses import MetricNode, MetricTree
@@ -32,6 +33,8 @@ from .normalize import (
 from .one_hot_encoder import DNAOneHotEncoder
 from .splicing import generate_splice_site_positions
 from .precision import dtype_policy_context, get_dtype_policy
+from .distributed import neighbor_gather
+from .utils import _register_pytree_dataclass
 
 
 HeadOutput = dict[str, torch.Tensor]
@@ -40,8 +43,11 @@ Predictions = dict[str, HeadOutput]
 _MODEL_CONFIG_FILENAME = "config.json"
 _MODEL_METADATA_FILENAME = "metadata.pt"
 _MODEL_STATE_FILENAME = "model.pt"
+_SEQUENCE_PARALLEL_BUFFER_BP = 1024
 
 
+# DDP must traverse these tensors when returned outputs are unused by the loss.
+@_register_pytree_dataclass
 @dataclass(frozen=True)
 class LossOutput:
     tree: MetricTree
@@ -174,7 +180,6 @@ class TransformerTower(nn.Module):
         self.pair_heads = pair_heads                                                            # H_p
         self.pos_channels = pos_channels                                                        # C_p
         self.mlp_ratio = mlp_ratio                                                              # M
-        self.dropout = dropout
         self.sync_bn = sync_bn
         assert self.num_q_heads % self.num_kv_heads == 0
 
@@ -196,16 +201,19 @@ class TransformerTower(nn.Module):
                     pair_heads=self.pair_heads,
                     pos_channels=self.pos_channels,
                     mlp_ratio=self.mlp_ratio,
-                    dropout=self.dropout,
+                    dropout=dropout,
                     sync_bn=self.sync_bn,
                 )
             )
 
-    def forward(self, x):                   # [B, S', C]
-        pair_x = None                       # [None]
+    def forward(self, x, parallel_context=None):        # [B, S'_local, C]
+        pair_x = None                                   # [None]
         for block in self.blocks:
-            x, pair_x = block(x, pair_x)    # [B, S', C], [B, P, P, F]
-        return x, pair_x                    # [B, S', C], [B, P, P, F]
+            x, pair_x = block(
+                x, pair_x,
+                parallel_context=parallel_context
+            )                                           # [B, S'_local, C], [B, P_local, P, F]
+        return x, pair_x                                # [B, S'_local, C], [B, P_local, P, F]
 
 
 class AlphaGenomeConfig():
@@ -342,7 +350,6 @@ class AlphaGenome(nn.Module):
         self.transformer_mlp_ratio = cfg.transformer_mlp_ratio                                                  # M
         self.embedder_mlp_ratio = cfg.embedder_mlp_ratio                                                        # M'
         self.init_scale = cfg.init_scale
-        self.dropout = cfg.dropout
         self.sync_bn = cfg.sync_bn
         self.num_splice_sites = cfg.num_splice_sites
         self.splice_site_channels = cfg.splice_site_channels
@@ -398,7 +405,7 @@ class AlphaGenome(nn.Module):
             pair_heads=self.pair_heads,
             pos_channels=self.pos_channels,
             mlp_ratio=self.transformer_mlp_ratio,
-            dropout=self.dropout,
+            dropout=cfg.dropout,
             sync_bn=self.sync_bn,
         )
         self.sequence_decoder = SequenceDecoder(
@@ -448,6 +455,12 @@ class AlphaGenome(nn.Module):
         # return the device of the first parameter (dangerous).
         return next(self.parameters()).device
 
+    def set_sync_bn(self, sync_bn: bool) -> None:
+        """Apply the SyncBN policy chosen by a distributed wrapper."""
+        for module in self.modules():
+            if isinstance(module, BatchNorm):
+                module.sync = sync_bn
+
     def save(self, model_dir: Path | str) -> None:
         model_dir = Path(model_dir)
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -477,8 +490,10 @@ class AlphaGenome(nn.Module):
         model.load_state_dict(state_dict)
         return model.to(torch.device(device))
 
-    def check_seq_len(self, seq_len: int):
+    def check_seq_len(self, seq_len: int, parallel_context=None):
         min_seq_len = (self.encoder_downsample_width**self.stages) * self.pair_downsample_width
+        if parallel_context is not None and parallel_context.sp_enabled:
+            min_seq_len *= parallel_context.sp_size
         if seq_len < min_seq_len:
             raise ValueError(
                 "Input sequence length must be at least "
@@ -546,12 +561,13 @@ class AlphaGenome(nn.Module):
         self,
         data: ModelInput,
         organism_index: OrganismIndex | None = None,
+        parallel_context=None,
     ) -> DataBatch:
         batch = self.as_data_batch(data, organism_index)
         dna_onehot = batch.dna_sequence_one_hot
         assert dna_onehot is not None
         _, seq_len, _ = dna_onehot.shape
-        self.check_seq_len(seq_len)
+        self.check_seq_len(seq_len, parallel_context)
         organism_index = batch.organism_index
         assert organism_index is not None
         return batch
@@ -561,7 +577,8 @@ class AlphaGenome(nn.Module):
         embeddings: Embeddings,                     # Embeddings object containing 1bp, 128bp, and pair embeddings
         splice_site_positions: torch.Tensor,        # [B, 4, K]
         organism_index: torch.Tensor,               # [B]
-        tissue_mask: torch.Tensor | None = None     # [B, #D, #A, T or 2*T]
+        tissue_mask: torch.Tensor | None = None,    # [B, #D, #A, T or 2*T]
+        parallel_context=None,
     ) -> dict[str, torch.Tensor]:
         """Predicts splice site junctions from embeddings and splice site positions.
 
@@ -576,38 +593,92 @@ class AlphaGenome(nn.Module):
             organism_index=organism_index,
             splice_site_positions=splice_site_positions,
             tissue_mask=tissue_mask,
+            parallel_context=parallel_context,
         )
 
-    def _embed_batch(self, batch: DataBatch) -> Embeddings:
+    def _encode_sequence(self, x, parallel_context=None):
+        # NOTE: This has responsibility for [full input → owned transformer output].
+        x = rearrange(x, 'b s c -> b c s')
+        if parallel_context is None or not parallel_context.sp_enabled:
+            return self.sequence_encoder(x)  # NOTE: anything following this line is SP
+
+        # The fixed SP buffer is created with the default convolution widths
+        if self.first_conv_width != 15 or self.block_width != 5:
+            raise ValueError(
+                "Sequence parallelism requires first_conv_width=15 and "
+                "block_width=5; got "
+                f"first_conv_width={self.first_conv_width} and "
+                f"block_width={self.block_width}."
+            )
+
+        S = x.shape[2]
+        center_start, center_end = parallel_context.sp_buffered_local_bounds(
+            S, buffer_size=_SEQUENCE_PARALLEL_BUFFER_BP
+        )
+        x = parallel_context.sp_buffered_shard(
+            x, dim=2, buffer_size=_SEQUENCE_PARALLEL_BUFFER_BP
+        )                                                               # [B, C_in, S] --> [B, C_in, S_local + buffer]
+        t, intermediates = self.sequence_encoder(x)                     # [B, C', S'_local + buffer]
+
+        scale = self.encoder_downsample_width**self.stages
+        center_start //= scale
+        center_end //= scale
+        t = t.narrow(2, center_start, center_end - center_start)        # [B, C', S'_local]
+        return t, intermediates
+
+    def _decode_sequence(self, t, intermediates, parallel_context=None):
+        # NOTE: This has responsibility for [owned transformer input → owned decoder output].
+        if parallel_context is None or not parallel_context.sp_enabled:
+            decoder_t = t
+        else:
+            scale = self.encoder_downsample_width**self.stages
+            buffer_size = _SEQUENCE_PARALLEL_BUFFER_BP // scale
+            decoder_t = neighbor_gather(
+                t,
+                dim=1,
+                buffer_size=buffer_size,
+                group=parallel_context.sp_group,
+            )                                                           # [B, S'_local, C'] --> [B, S'_local + buffer, C']
+            center_start = (
+                buffer_size
+                if parallel_context.sp_rank > 0
+                else 0
+            )
+            center_end = center_start + t.shape[1]
+
+        decoder_t = rearrange(decoder_t, 'b s c -> b c s')
+        x = self.sequence_decoder(decoder_t, intermediates)             # [B, C, S_local + buffer]
+        if parallel_context is not None and parallel_context.sp_enabled:
+            x = x.narrow(
+                2, center_start * scale,
+                (center_end - center_start) * scale
+            )                                                           # [B, C, S_local]
+        x = rearrange(x, 'b c s -> b s c')                              # [B, S_local, C]
+        return x
+
+    def _embed_batch(self, batch: DataBatch, parallel_context=None) -> Embeddings:
         """Compute output embeddings for an already normalized batch."""
         if batch.dna_sequence_one_hot is None or batch.organism_index is None:
             raise ValueError("A normalized batch requires DNA and organism data.")
         x = batch.dna_sequence_one_hot.to(self.dtype_policy.input_dtype)
         organism_index = batch.organism_index
+        t, intermediates = self._encode_sequence(x, parallel_context)
 
-        # Encode sequence with CNN encoder
-        x = rearrange(x, 'b s c -> b c s')                                              # [B, 4, S]
-        t, intermediates = self.sequence_encoder(x)                                     # [B, 4, S] --> x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] for U-Net skip connections
-
-        # Add organism embedding
         if self.num_organisms >= 1:
             org_embed = self.org_embedder(organism_index)
-            t = add('b c s, b c -> b c s', t, org_embed)                                # [B, C', S'] + [B, C', 1] --> [B, C', S']
+            t = add('b c s, b c -> b c s', t, org_embed)
 
-        # Transformer tower
-        t = rearrange(t, 'b c s -> b s c')                                              # [B, S', C']
-        t, pair_activations = self.transformer_tower(t)                                 # x: [B, S', C'] | pair_activations: [B, P, P, F]
-        t = rearrange(t, 'b s c -> b c s')                                              # [B, C', S']
-
-        # Decode sequence with CNN decoder
-        x = self.sequence_decoder(t, intermediates)                                     # x: [B, C', S'] | intermediates: [B, C_i, S // 2^i] --> [B, C, S]
-
-        # Output embedders
-        t = rearrange(t, 'b c s -> b s c')                                              # [B, S', C']
-        x = rearrange(x, 'b c s -> b s c')                                              # [B, S, C]
-        embeddings_t = self.output_t(t, organism_index)                                 # [B, S', C'*M']
-        embeddings_x = self.output_x(x, organism_index, skip_x=embeddings_t)            # [B, S, C'*M']
-        embeddings_pair = self.output_pair(pair_activations, organism_index)            # [B, P, P, F]
+        t = rearrange(t, 'b c s -> b s c')
+        t, pair_activations = self.transformer_tower(
+            t, parallel_context=parallel_context
+        )
+        x = self._decode_sequence(t, intermediates, parallel_context)
+        embeddings_t = self.output_t(t, organism_index)
+        embeddings_x = self.output_x(x, organism_index, skip_x=embeddings_t)
+        embeddings_pair = self.output_pair(
+            pair_activations, organism_index,
+            parallel_context=parallel_context,
+        )
 
         return Embeddings(
             embeddings_1bp=embeddings_x,
@@ -619,6 +690,7 @@ class AlphaGenome(nn.Module):
         self,
         embeddings: Embeddings,
         batch: DataBatch,
+        parallel_context=None,
     ) -> Predictions:
         """Run enabled prediction heads on normalized data and embeddings."""
         organism_index = batch.get_organism_index()
@@ -651,7 +723,7 @@ class AlphaGenome(nn.Module):
                     )
                 splice_sites_probabilities = predictions[
                     HeadName.SPLICE_SITES_CLASSIFICATION.value
-                ]["predictions"]
+                ]["predictions"]                                            # [B, S_local, T] (SP) or [B, S, T]
                 splice_site_positions = generate_splice_site_positions(
                     splice_sites_probabilities,
                     alt=None,
@@ -659,7 +731,15 @@ class AlphaGenome(nn.Module):
                     k=self.num_splice_sites,
                     pad_to_length=self.num_splice_sites,
                     threshold=self.splice_site_threshold,
-                )  # [B, 4, K]
+                    sequence_group=(
+                        parallel_context.sp_group
+                        if (
+                            parallel_context is not None
+                            and parallel_context.sp_enabled
+                        )
+                        else None
+                    ),
+                )  # [B, 4, K], identical across SP ranks
 
             splice_site_positions = _normalize_splice_site_positions(
                 splice_site_positions,
@@ -670,6 +750,7 @@ class AlphaGenome(nn.Module):
                 embeddings,
                 splice_site_positions,
                 organism_index,
+                parallel_context=parallel_context,
             )
 
         return predictions
@@ -678,6 +759,7 @@ class AlphaGenome(nn.Module):
         self,
         predictions: Predictions,
         batch: DataBatch,
+        parallel_context=None,
     ) -> MetricTree:
         """Compute losses from predictions and an already normalized batch.
 
@@ -699,7 +781,11 @@ class AlphaGenome(nn.Module):
                 )
 
             # Each head validates that its required targets are present.
-            head_losses[head_name] = head.loss(predictions[head_name], batch)
+            head_losses[head_name] = head.loss(
+                predictions[head_name],
+                batch,
+                parallel_context=parallel_context,
+            )
 
         if not head_losses:
             raise ValueError("Cannot compute loss because no heads are enabled.")
@@ -713,13 +799,18 @@ class AlphaGenome(nn.Module):
         mode: Literal["embed", "predict", "loss"] = "predict",
         return_predictions: bool | None = None,
         return_embeddings: bool | None = None,
+        parallel_context=None,
     ) -> (
         Embeddings
         | Predictions
         | tuple[Predictions, Embeddings]
         | LossOutput
     ):
-        """Embed DNA, predict from it, or compute losses with its targets."""
+        """Embed DNA, predict from it, or compute losses with its targets.
+
+        ``parallel_context`` applies only to this call and is normally supplied
+        by the DDP/FSDP wrapper. It is never stored on the base model.
+        """
         if mode not in {"embed", "predict", "loss"}:
             raise ValueError(
                 "mode must be 'embed', 'predict', or 'loss', "
@@ -740,22 +831,34 @@ class AlphaGenome(nn.Module):
         if mode == "loss" and not isinstance(data, DataBatch):
             raise TypeError("Loss mode requires a DataBatch with targets.")
 
-        batch = self._prepare_batch(data, organism_index)
+        batch = self._prepare_batch(data, organism_index, parallel_context)
         with dtype_policy_context(self.dtype_policy, self.device.type):
-            embeddings = self._embed_batch(batch)
+            embeddings = self._embed_batch(batch, parallel_context)
 
             if mode == "embed":
                 return self.dtype_policy.cast_output(embeddings)
 
-            predictions = self._predict_from_embeddings(embeddings, batch)
+            predictions = self._predict_from_embeddings(
+                embeddings, batch, parallel_context
+            )
             if mode == "predict":
                 predictions = self.dtype_policy.cast_output(predictions)
                 if return_embeddings:
                     return predictions, self.dtype_policy.cast_output(embeddings)
                 return predictions
             
-            metric_tree = self.metric_tree_from_predictions(predictions, batch)
-            return self.dtype_policy.cast_output(
+            metric_tree = self.metric_tree_from_predictions(
+                predictions, batch, parallel_context
+            )
+            if (
+                parallel_context is not None
+                and parallel_context.loss_group is not None
+            ):
+                metric_tree = metric_tree.distributed_reduce(
+                    parallel_context.loss_group
+                )
+
+            output = self.dtype_policy.cast_output(
                 LossOutput(
                     tree=metric_tree,
                     total=metric_tree.total_loss(),
@@ -763,6 +866,7 @@ class AlphaGenome(nn.Module):
                     embeddings=embeddings if return_embeddings else None,
                 )
             )
+            return replace(output, total=output.tree.total_loss())
 
     def embed(
         self,

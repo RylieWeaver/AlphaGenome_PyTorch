@@ -40,7 +40,10 @@ class DtypePolicy:
         if isinstance(value, torch.Tensor):
             return value.to(dtype) if value.is_floating_point() else value
         if isinstance(value, LossLeaf):
-            return LossLeaf(self._cast_tree(value.value, dtype))
+            return LossLeaf(
+                self._cast_tree(value.numerator, dtype),
+                self._cast_tree(value.denominator, dtype),
+            )
         if isinstance(value, MetricTree):
             return MetricTree(self._cast_tree(value.children, dtype))
         if isinstance(value, dict):

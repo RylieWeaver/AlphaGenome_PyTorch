@@ -13,8 +13,9 @@ output.total.backward()
 optimizer.step()
 ```
 
-`model(batch, mode="loss")` and `model.loss(batch)` are equivalent for direct
-model use. Both preserve the current model mode and gradient context.
+`model(batch, mode="loss")` and `model.loss(batch)` are equivalent on
+`AlphaGenome` and the package's parallel execution wrappers. Both preserve the current
+model mode and gradient context.
 
 :::{admonition} Required Batch State
 :class: important
@@ -48,14 +49,52 @@ predictions = output.predictions  # Nested dictionary of enabled-head outputs
 embeddings = output.embeddings    # 1-bp, 128-bp, and pair representations
 ```
 
+## LossLeaf
+
+A `LossLeaf(numerator, denominator=1.0)` stores the sum and count for one mean
+loss term. Combining these across ranks gives the correct global mean, even
+when ranks have different numbers of valid targets.
+
+| Member | Meaning |
+| --- | --- |
+| `numerator` | Sum of losses over valid targets, including any term weighting |
+| `denominator` | Number of valid targets included in that sum. Does not track gradients |
+| `value` | Scalar tensor equal to `numerator / denominator` when the denominator is positive, otherwise zero |
+
+The numerator retains its autograd history. The denominator is converted to
+the numerator's device and dtype, then detached. For example:
+
+```{code-block} python
+import torch
+from alphagenome_pt import LossLeaf
+
+errors = torch.tensor([1.0, 3.0], requires_grad=True)
+leaf = LossLeaf(errors.sum(), errors.numel())
+
+print(leaf.numerator.item())    # 4.0
+print(leaf.denominator.item())  # 2.0
+print(leaf.value.item())        # 2.0
+leaf.value.backward()
+```
+
+`leaf.add(other)` sums both numerators and both denominators and detaches
+by default (pass `detach=False` to retain the numerator computation graph).
+As a result, losses with different counts combine as
+`(numerator_a + numerator_b) / (denominator_a + denominator_b)` as desired
+for the true global mean.
+
 ## MetricTree
 
-Loss mode returns a `LossOutput` whose `tree` has one top-level branch for each enabled head. The structure beneath each head depends on its loss, and every path ends in a `LossLeaf` containing one scalar loss term.
+Loss mode returns a `LossOutput` whose `tree` has one top-level branch for
+each enabled head. The structure beneath each head depends on its loss, and
+every path ends in a `LossLeaf`. Tree totals sum the `.value` of each
+selected leaf.
 
 :::{note}
-When an availability mask excludes every value from a loss term, its
-`LossLeaf` remains in the tree as a zero so paths stay consistent across
-batches.
+When an availability mask fully excludes a loss term, its leaf has zero
+numerator/denominator/value. We keep that leaf in the tree so paths stay
+consistent across batches and ranks. Other ranks may still contribute valid
+values when the statistics are reduced.
 :::
 
 :::{container} long-table
@@ -68,7 +107,8 @@ batches.
 | `leaf_paths()` | Returns all leaf paths in canonical order |
 | `to_dict()` | Converts the hierarchy to nested dictionaries of tensors |
 | `detach()` | Returns a new tree without autograd history |
-| `add()` | Sums trees with matching leaf paths and detaches by default. Pass `detach=False` to retain both computation graphs |
+| `add()` | Sums corresponding leaf numerators and denominators and detaches by default. Pass `detach=False` to retain computation graphs |
+| `distributed_reduce(group)` | Returns a new tree with corresponding leaf numerators and denominators summed across the process group, preserving numerator autograd history. |
 
 :::
 
@@ -93,7 +133,8 @@ head_totals = tree.head_loss_totals()  # dict[str, torch.Tensor]
 
 ### Conversion to Dictionary
 
-`to_dict()` returns new nested dictionaries while preserving the original leaf tensors and their autograd history:
+`to_dict()` returns nested dictionaries of each leaf's `.value`, preserving
+autograd history:
 
 ```{code-block} python
 values = tree.to_dict()
@@ -102,14 +143,13 @@ positional = values["rna_seq"]["128bp"]["positional"]
 
 ### Detach and Accumulate
 
-`add()` accumulates the complete loss hierarchy across batches without
-manually traversing nested dictionaries. `detach()` removes autograd history
-from trees retained for reporting. Together, they make it possible to
-accumulate logging statistics over multiple batches:
+`add()` sums each leaf's numerator and denominator across two batches and 
+detaches by default. `detach()` removes autograd history from an individual
+tree. Use them to accumulate logging statistics without retaining computation
+graphs:
 
 ```{code-block} python
 accumulated = None
-num_batches = 0
 
 for batch in batches:
     tree = model(batch, mode="loss").tree
@@ -118,23 +158,16 @@ for batch in batches:
         if accumulated is None
         else accumulated.add(tree)
     )
-    num_batches += 1
 
-mean_head_losses = {
-    head: total / num_batches
-    for head, total in accumulated.head_loss_totals().items()
-}
+mean_head_losses = accumulated.head_loss_totals()
 ```
 
 :::{admonition} Aggregation Semantics
 :class: note
 
-Divide accumulated values by `num_batches` for an unweighted mean across
-batches. This does not account for sample or valid-element weighting and does
-not reduce across distributed processes.
-
-Future `MetricTree` leaves will store numerator/denominator values and support
-distributed aggregation, replacing division by `num_batches`.
+Each accumulated leaf's value is its summed numerator divided by its summed
+denominator. This preserves each loss term's weighting when valid-target
+counts differ between batches.
 :::
 
 ### From Existing Predictions
@@ -147,7 +180,11 @@ predictions = model(batch, mode="predict")
 tree = model.metric_tree_from_predictions(predictions, batch)
 ```
 
-`metric_tree_from_predictions()` does not run the model or prepare the batch. It computes each enabled head's losses from the supplied predictions and the normalized batch's organism index, targets, and masks. It does not detach predictions, so gradients are retained when the predictions come from a gradient-tracked model call.
+`metric_tree_from_predictions()` does not run the model or prepare the batch.
+It computes each enabled head's losses from the supplied predictions and the
+normalized batch's organism index, targets, and masks. It does not detach
+predictions, so gradients are retained when the predictions come from a
+gradient-tracked model call.
 
 ### Tree Structure
 
@@ -208,20 +245,19 @@ masked_language_modeling
 
 ## Parallelism
 
-During `DistributedDataParallel` (DDP) training, compute loss through `ddp_model(batch, mode="loss")` so the forward pass runs through DDP's hooks:
+The package's DDP/FSDP wrappers, constructed with `distribute_alphagenome()`,
+support both `model.loss(batch)` and `model(batch, mode="loss")`. Their built-in
+loss statistics are already reduced over `model.parallel_context.loss_group`,
+which matches the wrapper's gradient-averaging group.
+
+With SP, predictions and embeddings remain local to each shard. Unequal
+sequence lengths or valid-target counts across DP replicas are handled by
+summing numerators and denominators before dividing.
 
 ```{code-block} python
-output = ddp_model(batch, mode="loss")
+output = parallel_model(batch, mode="loss")
 output.total.backward()
 ```
 
-:::{dropdown} DDP Wrapper Requirement
-:color: warning
-:icon: alert
-
-Do not call `ddp_model.module.loss(batch)`. Bypassing the wrapper can cause
-reducer errors when `find_unused_parameters=True`.
-:::
-
-Other forms of parallelism are not currently offered, but sequence parallelism
-is in development.
+See [Parallelism](parallelism.md) for setup, data distribution, output shapes,
+BatchNorm behavior, and checkpoint saving.
