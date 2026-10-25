@@ -5,13 +5,15 @@ import torch
 
 from alphagenome_pt import (
     HeadName,
+    Metadata,
     get_dtype_policy,
     small_alphagenome,
     synthetic_batch,
     synthetic_metadata,
 )
-from alphagenome_pt.precision import FLOAT64_DTYPE_POLICY
+from alphagenome_pt.precision import FLOAT64_DTYPE_POLICY, dtype_policy_context
 from alphagenome_pt.checkpoint import load_deepmind_state
+from alphagenome_pt.serialization import _load_metadata, _save_metadata, _save_state_dict
 
 
 ### TESTS ###
@@ -22,8 +24,8 @@ def test_policy_rejects_compute_uptype_narrower_than_compute_dtype():
 
 def test_checkpoint_assignment_restores_parameter_dtype(tmp_path):
     source = small_alphagenome(dtype_policy="float32")
-    checkpoint_path = tmp_path / "state.pt"
-    torch.save(source.state_dict(), checkpoint_path)
+    checkpoint_path = tmp_path / "state.safetensors"
+    _save_state_dict(source.state_dict(), checkpoint_path)
 
     target = small_alphagenome(dtype_policy="float64")
     load_deepmind_state(
@@ -40,6 +42,33 @@ def test_checkpoint_assignment_restores_parameter_dtype(tmp_path):
     ]
     assert floating_state
     assert all(value.dtype == torch.float64 for value in floating_state)
+
+
+@pytest.mark.parametrize("policy_name", ("deepmind", "bfloat16", "float32", "float64"))
+def test_json_metadata_preserves_track_means_precision(tmp_path, policy_name):
+    metadata = synthetic_metadata((HeadName.RNA_SEQ,), organisms=("human",))
+    head_metadata = metadata.metadata["heads"]["rna_seq"]
+    # This value rounds to 1.0 if the JSON list passes through FP32.
+    expected = torch.full_like(head_metadata["means"], 1.00000001, dtype=torch.float64)
+    head_metadata["means"] = expected
+    path = tmp_path / "metadata.json"
+    _save_metadata(metadata.metadata, path)
+
+    policy = get_dtype_policy(policy_name)
+    with dtype_policy_context(policy, "cpu"):
+        model = small_alphagenome(
+            Metadata(_load_metadata(path)),
+            max_seq_len=2_048,
+            num_channels=16,
+            transformer_layers=1,
+            dtype_policy=policy_name,
+        )
+
+    torch.testing.assert_close(
+        model._heads["rna_seq"]._track_means,
+        expected.to(policy.parameter_dtype),
+        rtol=0, atol=0,
+    )
 
 
 @pytest.mark.parametrize(

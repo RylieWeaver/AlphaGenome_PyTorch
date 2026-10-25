@@ -4,8 +4,11 @@
 # configuration and model save/load tests are original work.
 
 # External
+import json
+
 import pytest
 import torch
+from safetensors.torch import load_file
 
 # Internal
 from alphagenome_pt import (
@@ -16,6 +19,7 @@ from alphagenome_pt import (
     synthetic_metadata,
     small_alphagenome,
 )
+from alphagenome_pt.serialization import _save_state_dict
 from .helpers import (
     DNA_SEQUENCE,
     assert_finite_metric_tree,
@@ -115,9 +119,11 @@ def test_config_save_load_roundtrip(tmp_path):
     cfg = model.cfg
 
     cfg_path = tmp_path / "config.json"
-    metadata_path = tmp_path / "metadata.pt"
+    metadata_path = tmp_path / "metadata.json"
     cfg.save(cfg_path, metadata_path)
     loaded = AlphaGenomeConfig.load(cfg_path, metadata_path)
+    saved_metadata = json.loads(metadata_path.read_text())
+    assert isinstance(saved_metadata["heads"]["rna_seq"]["means"], list)
 
     assert loaded.max_seq_len == cfg.max_seq_len
     assert loaded.num_channels == cfg.num_channels
@@ -133,12 +139,12 @@ def test_config_save_load_roundtrip(tmp_path):
     assert loaded.dtype_policy == cfg.dtype_policy
     assert loaded.metadata.get_heads() == cfg.metadata.get_heads()
     assert torch.equal(
-        loaded.metadata.metadata["heads"]["rna_seq"]["means"],
-        cfg.metadata.metadata["heads"]["rna_seq"]["means"],
+        torch.as_tensor(loaded.metadata.metadata["heads"]["rna_seq"]["means"]),
+        torch.as_tensor(cfg.metadata.metadata["heads"]["rna_seq"]["means"]),
     )
     assert torch.equal(
-        loaded.metadata.metadata["heads"]["rna_seq"]["track_mask"],
-        cfg.metadata.metadata["heads"]["rna_seq"]["track_mask"],
+        torch.as_tensor(loaded.metadata.metadata["heads"]["rna_seq"]["track_mask"]),
+        torch.as_tensor(cfg.metadata.metadata["heads"]["rna_seq"]["track_mask"]),
     )
 
     loaded_model = AlphaGenome(loaded)
@@ -193,12 +199,13 @@ def test_model_save_load_roundtrip(tmp_path):
 
     model_dir = tmp_path / "nested" / "model"
     model.save(model_dir)
+    assert (model_dir / "config.json").is_file()
+    assert (model_dir / "metadata.json").is_file()
+    torch.testing.assert_close(
+        load_file(model_dir / "model.safetensors"), model.state_dict(), rtol=0, atol=0,
+    )
     loaded_model = AlphaGenome.load(model_dir)
     loaded_model.eval()
-
-    assert (model_dir / "config.json").is_file()
-    assert (model_dir / "metadata.pt").is_file()
-    assert (model_dir / "model.pt").is_file()
 
     model_config = model.cfg.to_dict().copy()
     loaded_config = loaded_model.cfg.to_dict().copy()
@@ -209,14 +216,14 @@ def test_model_save_load_roundtrip(tmp_path):
     assert loaded_model.metadata.get_organisms() == model.metadata.get_organisms()
     assert loaded_model.metadata.get_heads() == model.metadata.get_heads()
     torch.testing.assert_close(
-        loaded_model.metadata.metadata["heads"]["rna_seq"]["means"],
-        model.metadata.metadata["heads"]["rna_seq"]["means"],
+        torch.as_tensor(loaded_model.metadata.metadata["heads"]["rna_seq"]["means"]),
+        torch.as_tensor(model.metadata.metadata["heads"]["rna_seq"]["means"]),
         rtol=0,
         atol=0,
     )
     torch.testing.assert_close(
-        loaded_model.metadata.metadata["heads"]["rna_seq"]["track_mask"],
-        model.metadata.metadata["heads"]["rna_seq"]["track_mask"],
+        torch.as_tensor(loaded_model.metadata.metadata["heads"]["rna_seq"]["track_mask"]),
+        torch.as_tensor(model.metadata.metadata["heads"]["rna_seq"]["track_mask"]),
         rtol=0,
         atol=0,
     )
@@ -244,9 +251,9 @@ class TestStateDictContracts:
         torch.manual_seed(999)
         target, _ = build_small_model()
 
-        path = tmp_path / "model.pt"
-        torch.save(source.state_dict(), path)
-        target.load_state_dict(torch.load(path, weights_only=True))
+        path = tmp_path / "model.safetensors"
+        _save_state_dict(source.state_dict(), path)
+        target.load_state_dict(load_file(path))
 
         for (name, expected), (_, actual) in zip(
             source.named_parameters(), target.named_parameters()
@@ -274,12 +281,12 @@ class TestStateDictContracts:
         with torch.no_grad():
             before = source.embed(batch)
 
-        path = tmp_path / "model.pt"
-        torch.save(source.state_dict(), path)
+        path = tmp_path / "model.safetensors"
+        _save_state_dict(source.state_dict(), path)
 
         torch.manual_seed(999)
         target, _ = build_small_model()
-        target.load_state_dict(torch.load(path, weights_only=True))
+        target.load_state_dict(load_file(path))
         target.eval()
         with torch.no_grad():
             after = target.embed(batch)

@@ -35,6 +35,7 @@ from alphagenome_pt.checkpoint import (
     _download_hf_file,
     _flexible_load_deepmind_state,
 )
+from alphagenome_pt.serialization import _save_state_dict
 
 
 
@@ -82,7 +83,7 @@ def test_download_deepmind_metadata_from_hf(tmp_path):
 @pytest.mark.parametrize(
     ("repo_filename", "contents"),
     [
-        ("state.pt", "checkpoint"),
+        ("state.safetensors", "checkpoint"),
         ("metadata.json", '{"organisms": ["human"], "heads": {}}'),
     ],
 )
@@ -130,7 +131,7 @@ def _save_state(
     filename: str | None = None,
 ):
     path = tmp_path / (filename or fold_filename(DEFAULT_FOLD))
-    torch.save(state_dict, path)
+    _save_state_dict(state_dict, path)
     return path
 
 
@@ -689,6 +690,35 @@ def test_deepmind_metadata_downloads_hf_metadata(monkeypatch, tmp_path):
 
 
 ### HIGH-LEVEL LOADING ###
+@pytest.mark.parametrize("operation", ("load_missing", "load_forced", "download"))
+def test_checkpoint_download_rejects_pt_filename(tmp_path, monkeypatch, operation):
+    path = tmp_path / "checkpoint.pt"
+    if operation == "load_forced":
+        path.write_bytes(b"existing checkpoint")
+
+    def unexpected_download(*args, **kwargs):
+        pytest.fail("Invalid filenames must be rejected before downloading.")
+
+    monkeypatch.setattr(
+        "alphagenome_pt.checkpoint.download_deepmind_state", unexpected_download,
+    )
+    with pytest.raises(ValueError, match=r"now use \.safetensors instead of \.pt"):
+        if operation == "download":
+            download_alphagenome_checkpoint(path)
+        else:
+            load_deepmind_state(
+                torch.nn.Linear(1, 1),
+                local_dir=tmp_path,
+                local_filename=path.name,
+                force_download=operation == "load_forced",
+            )
+
+    if operation == "load_forced":
+        assert path.read_bytes() == b"existing checkpoint"
+    else:
+        assert not path.exists()
+
+
 def test_load_deepmind_state_accepts_local_filename(tmp_path):
     source_model = small_alphagenome()
     target_model = small_alphagenome()
@@ -697,7 +727,7 @@ def test_load_deepmind_state_accepts_local_filename(tmp_path):
     _fill_model_state(target_model, -1.0)
 
     source_state = source_model.state_dict()
-    local_filename = "tmp_state.pt"
+    local_filename = "tmp_state.safetensors"
     _save_state(tmp_path, source_state, local_filename)
 
     load_result = load_deepmind_state(
@@ -720,7 +750,7 @@ def test_load_deepmind_state_uses_cwd_for_local_filename_without_local_dir(tmp_p
     _fill_model_state(target_model, -1.0)
 
     source_state = source_model.state_dict()
-    local_filename = "tmp_state.pt"
+    local_filename = "tmp_state.safetensors"
     _save_state(tmp_path, source_state, local_filename)
 
     monkeypatch.chdir(tmp_path)
@@ -761,7 +791,7 @@ def test_load_deepmind_model_can_load_state(
     _fill_model_state(source_model, 1.0)
 
     source_state = source_model.state_dict()
-    local_filename = "tmp_state.pt"
+    local_filename = "tmp_state.safetensors"
     _save_state(tmp_path, source_state, local_filename)
 
     model = deepmind_model(
@@ -864,7 +894,7 @@ def test_download_alphagenome_checkpoint_accepts_output_file(monkeypatch, tmp_pa
         fake_download_deepmind_state,
     )
 
-    output_path = tmp_path / "old_checkpoint_name.pt"
+    output_path = tmp_path / "custom_checkpoint.safetensors"
     path = download_alphagenome_checkpoint(output_path)
 
     assert path == output_path
@@ -880,7 +910,7 @@ def test_load_alphagenome_checkpoint_accepts_checkpoint_file(tmp_path):
     _fill_model_state(target_model, -1.0)
 
     source_state = source_model.state_dict()
-    checkpoint_path = _save_state(tmp_path, source_state, "old_checkpoint_name.pt")
+    checkpoint_path = _save_state(tmp_path, source_state, "custom_checkpoint.safetensors")
 
     load_result = load_alphagenome_checkpoint(
         target_model,

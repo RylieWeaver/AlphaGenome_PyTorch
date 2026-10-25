@@ -189,13 +189,15 @@ from alphagenome_pt import AlphaGenomeConfig
 
 config.save(
     cfg_path="config.json",
-    metadata_path="metadata.pt",
+    metadata_path="metadata.json",
 )
 loaded_config = AlphaGenomeConfig.load(
     cfg_path="config.json",
-    metadata_path="metadata.pt",
+    metadata_path="metadata.json",
 )
 ```
+
+Metadata tensors are saved as JSON lists.
 
 :::{admonition} Configuration Files Do Not Include Model State
 :class: note

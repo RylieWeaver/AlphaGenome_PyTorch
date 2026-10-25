@@ -17,7 +17,7 @@ the full scope of what has been verified.
 | --- | --- |
 | JAX implementation | [`alphagenome_research` commit `1e55dcf`](https://github.com/google-deepmind/alphagenome_research/commit/1e55dcffb98ba26b31e74edc5e9f038f54c0e89d) |
 | Source model state | Official JAX `all_folds` checkpoint from [`google/alphagenome-all-folds`](https://huggingface.co/google/alphagenome-all-folds) |
-| Converted model state | Corresponding `alphagenome_all_folds.pt`, derived with this repository's converter and loaded from [`RylieWeaver/alphagenome-pytorch`](https://huggingface.co/RylieWeaver/alphagenome-pytorch) |
+| Converted model state | Corresponding `alphagenome_all_folds.safetensors`, derived with this repository's converter and loaded from [`RylieWeaver/alphagenome-pytorch`](https://huggingface.co/RylieWeaver/alphagenome-pytorch) |
 
 ## Test Inputs
 

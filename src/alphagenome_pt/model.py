@@ -35,14 +35,15 @@ from .splicing import generate_splice_site_positions
 from .precision import dtype_policy_context, get_dtype_policy
 from .distributed import neighbor_gather
 from .utils import _register_pytree_dataclass
+from .serialization import _load_metadata, _load_state_dict, _save_metadata, _save_state_dict
 
 
 HeadOutput = dict[str, torch.Tensor]
 Predictions = dict[str, HeadOutput]
 
 _MODEL_CONFIG_FILENAME = "config.json"
-_MODEL_METADATA_FILENAME = "metadata.pt"
-_MODEL_STATE_FILENAME = "model.pt"
+_MODEL_METADATA_FILENAME = "metadata.json"
+_MODEL_STATE_FILENAME = "model.safetensors"
 _SEQUENCE_PARALLEL_BUFFER_BP = 1024
 
 
@@ -299,7 +300,7 @@ class AlphaGenomeConfig():
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=4)
         metadata_obj = self.metadata.metadata if isinstance(self.metadata, Metadata) else self.metadata
-        torch.save(metadata_obj, metadata_path)
+        _save_metadata(metadata_obj, metadata_path)
     
     @staticmethod
     def load(
@@ -310,18 +311,10 @@ class AlphaGenomeConfig():
         with open(cfg_path, "r") as f:
             cfg_dict = json.load(f)
 
-        metadata_raw = torch.load(
-            metadata_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        if isinstance(metadata_raw, Metadata):
-            metadata_obj = metadata_raw
-        elif isinstance(metadata_raw, dict):
-            metadata_obj = Metadata(metadata_raw)
-        else:
+        metadata_raw = _load_metadata(metadata_path)
+        if not isinstance(metadata_raw, dict):
             raise TypeError(f"Unsupported metadata type in {metadata_path}: {type(metadata_raw)}")
-        cfg_dict["metadata"] = metadata_obj
+        cfg_dict["metadata"] = Metadata(metadata_raw)
 
         return AlphaGenomeConfig(**cfg_dict)
 
@@ -468,7 +461,7 @@ class AlphaGenome(nn.Module):
             cfg_path=model_dir / _MODEL_CONFIG_FILENAME,
             metadata_path=model_dir / _MODEL_METADATA_FILENAME,
         )
-        torch.save(self.state_dict(), model_dir / _MODEL_STATE_FILENAME)
+        _save_state_dict(self.state_dict(), model_dir / _MODEL_STATE_FILENAME)
 
     @classmethod
     def load(
@@ -482,11 +475,7 @@ class AlphaGenome(nn.Module):
             metadata_path=model_dir / _MODEL_METADATA_FILENAME,
         )
         model = cls(config)
-        state_dict = torch.load(
-            model_dir / _MODEL_STATE_FILENAME,
-            map_location="cpu",
-            weights_only=True,
-        )
+        state_dict = _load_state_dict(model_dir / _MODEL_STATE_FILENAME)
         model.load_state_dict(state_dict)
         return model.to(torch.device(device))
 

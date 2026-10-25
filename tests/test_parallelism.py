@@ -531,7 +531,7 @@ def test_parallel_checkpoint_round_trip(
     if dist.get_rank() == 0:
         restored = AlphaGenome.load(paths[0], device="cpu")
         assert not hasattr(restored, "parallel_context")
-        torch.testing.assert_close(restored.state_dict(), expected)
+        torch.testing.assert_close(restored.state_dict(), expected, rtol=0, atol=0)
 
     dist.barrier()
 

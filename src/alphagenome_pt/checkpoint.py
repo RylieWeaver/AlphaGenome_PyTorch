@@ -42,6 +42,7 @@ from torch import nn
 from .metadata import Metadata
 from .model import AlphaGenome, AlphaGenomeConfig
 from .utils import package_version
+from .serialization import _load_state_dict
 
 
 
@@ -55,7 +56,7 @@ DEFAULT_RAW_METADATA_FILENAME = "alphagenome_metadata_raw.json"
 DEFAULT_METADATA_SUMMARY_FILENAME = "alphagenome_metadata_summary.json"
 
 def fold_filename(fold_name: str) -> str:
-    return f"alphagenome_{fold_name}.pt"
+    return f"alphagenome_{fold_name}.safetensors"
 
 
 # NOTE: Pay special attention to update these 
@@ -843,8 +844,12 @@ def load_deepmind_state(
         if local_dir is None
         else local_dir / local_filename
     )
-
     if resolved_checkpoint_path is None or not resolved_checkpoint_path.exists() or force_download:
+        if Path(local_filename).suffix != ".safetensors":
+            raise ValueError(
+                "Downloaded checkpoints now use .safetensors instead of .pt. "
+                "Use a filename ending in '.safetensors'."
+            )
         downloaded_path = download_deepmind_state(
             local_dir,
             fold=fold,
@@ -859,7 +864,7 @@ def load_deepmind_state(
             resolved_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(downloaded_path, resolved_checkpoint_path)
 
-    state_dict = torch.load(resolved_checkpoint_path, map_location=map_location)
+    state_dict = _load_state_dict(resolved_checkpoint_path, map_location=map_location)
     model_state_dict = model.state_dict()
     state_dict, ignored_missing_keys = _flexible_load_deepmind_state(
         source_state_dict=state_dict,
@@ -1025,6 +1030,11 @@ def download_alphagenome_checkpoint(
     # Backwards-compatibility shim for older callers that passed a destination
     # directory or destination checkpoint file as the first argument.
     output_path = None if output_path is None else Path(output_path).expanduser()
+    if output_path is not None and output_path.suffix not in ("", ".safetensors"):
+        raise ValueError(
+            "Downloaded checkpoints now use .safetensors instead of .pt. "
+            "Use a filename ending in '.safetensors'."
+        )
     local_dir = (
         output_path.parent
         if output_path is not None and output_path.suffix
@@ -1067,7 +1077,7 @@ def load_alphagenome_checkpoint(
     path = Path(checkpoint_path).expanduser()
     if path.exists() and path.is_dir():
         local_dir = path
-        local_filename = kwargs.pop("local_filename", fold_filename(DEFAULT_FOLD))
+        local_filename = kwargs.pop("local_filename", None)
     else:
         local_dir = path.parent
         local_filename = path.name
