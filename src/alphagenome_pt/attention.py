@@ -486,7 +486,7 @@ class SequenceToPairBlock(nn.Module):
             q_pos = torch.arange(q_start, q_end, device=device)                                         # [P_local]
             k_pos = torch.arange(P, device=device)                                                      # [P]
             # NOTE: Use offset of P because positions [-P, P-1] correspond to idx [0, 2P-1]
-            # NOTE: Can't use _shift() because is assume axes shape [P x P]
+            # NOTE: Can't use _shift() because it assume axes shape [P x P]
             q_pos_encoding = pos_encoding[P + k_pos[None, :] - q_pos[:, None]]                          # [P_local, P, H_p, F] (rel pos q -> k)
             k_pos_encoding = pos_encoding[P + q_pos[:, None] - k_pos[None, :]]                          # [P_local, P, H_p, F] (rel pos k -> q)
             rel_q_a = torch.einsum('bqhc,qkhc->bqkh', q + self.q_r_bias, q_pos_encoding)                # [B, P_local, P, H_p]
