@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
-import torch
 
 # Internal
 from alphagenome_pt import FOLD_NAMES, fold_filename
+from alphagenome_pt.serialization import _save_state_dict
 from .load import load_jax_state
 from .mapping_state import convert_state
 
@@ -36,7 +36,7 @@ def convert_fold(fold: str, *, model_path: Path | None, torch_output_dir: Path, 
 
     print(f"Saving tensors to {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(converted, output)
+    _save_state_dict(converted, output)
 
     print(f"Completed conversion of fold {fold} to PyTorch state_dict at {output}")
     return output
@@ -73,7 +73,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=Path("."),
         help=(
             "Directory where the converted PyTorch state_dict will be written. "
-            "Output filename is alphagenome_{fold_name}.pt."
+            "Output filename is alphagenome_{fold_name}.safetensors."
         ),
     )
     parser.add_argument(

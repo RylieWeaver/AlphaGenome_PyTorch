@@ -61,7 +61,7 @@ python -m alphagenome_pt.jax2pt.convert_state \
 | `--fold` | `None` | Supplied: convert `all_folds` or one of `fold_0` through `fold_3`. Omitted: convert all five |
 | `--all-checkpoints` | `False` | Convert all five explicitly. Cannot be combined with `--fold` |
 | `--jax-input-dir` | `None` | `None`: load through the official Hugging Face loader. Supplied: load each fold from a same-named JAX checkpoint directory under this path |
-| `--torch-output-dir` | `.` | Write each converted state dictionary as `alphagenome_<fold>.pt` |
+| `--torch-output-dir` | `.` | Write each converted state dictionary as `alphagenome_<fold>.safetensors` |
 | `--device` | `cpu` | JAX backend used to load the checkpoint. The first matching device is selected |
 
 :::
@@ -144,7 +144,7 @@ artifact_dir = Path("checkpoints")
 fold = "all_folds"
 
 assert (artifact_dir / "alphagenome_metadata.json").is_file()
-assert (artifact_dir / f"alphagenome_{fold}.pt").is_file()
+assert (artifact_dir / f"alphagenome_{fold}.safetensors").is_file()
 
 metadata = deepmind_metadata(artifact_dir)
 model = deepmind_model(metadata=metadata)

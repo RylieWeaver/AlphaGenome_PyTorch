@@ -37,8 +37,8 @@ The command copies these files into `checkpoints/`:
 | `alphagenome_metadata.json` | Metadata used for model construction |
 | `alphagenome_metadata_raw.json` | Public metadata before conversion |
 | `alphagenome_metadata_summary.json` | Human-readable metadata inventory |
-| `alphagenome_all_folds.pt` | Converted all-folds checkpoint state |
-| `alphagenome_fold_0.pt`<br>`alphagenome_fold_1.pt`<br>`alphagenome_fold_2.pt`<br>`alphagenome_fold_3.pt` | Converted fold-specific checkpoint states |
+| `alphagenome_all_folds.safetensors` | Converted all-folds checkpoint state |
+| `alphagenome_fold_0.safetensors`<br>`alphagenome_fold_1.safetensors`<br>`alphagenome_fold_2.safetensors`<br>`alphagenome_fold_3.safetensors` | Converted fold-specific checkpoint states |
 
 ```{code-block} bash
 :caption: Download metadata and one fold-specific checkpoint

@@ -633,10 +633,12 @@ class GenomeTracksHead(Head):
         if isinstance(track_means, torch.Tensor):
             _track_means = track_means.detach().clone()
         else:
-            _track_means = torch.as_tensor(track_means)
+            _track_means = torch.as_tensor(
+                track_means, dtype=_ACTIVE_DTYPE_POLICY.get().parameter_dtype,
+            )
         self.register_buffer(
             "_track_means",
-            _track_means.to(_ACTIVE_DTYPE_POLICY.get().compute_uptype),
+            _track_means.to(_ACTIVE_DTYPE_POLICY.get().parameter_dtype),
             persistent=False,
         )                                                                   # [O, T]
         self._register_metadata_mask("_track_mask", track_mask)             # [O, T]

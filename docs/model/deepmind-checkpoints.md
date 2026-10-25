@@ -43,7 +43,7 @@ See [Flexible Loading](#flexible-loading) for the organism and head arguments.
 | `dtype_policy` | `"deepmind"` | Runtime precision policy (see [Precision and Dtype Policies](configuration.md#precision-and-dtype-policies) for options and behavior). |
 | `load_state` | `False` | `False`: skip state loading. `True`: resolve state (`local_dir` &rarr; Hugging Face cache/download), then apply flexible loading. |
 | `local_dir` | `None` | `None`: Hugging Face cache/download. Supplied: local directory for metadata and state. In either location, reuse an existing file &rarr; download if missing. |
-| `local_filename` | `None` | Local state filename: supplied value &rarr; `alphagenome_<fold>.pt`. |
+| `local_filename` | `None` | Local state filename: supplied value &rarr; `alphagenome_<fold>.safetensors`. |
 | `organisms` | `True` | `True`: load standalone organism tensors using prefix loading or `organism_spec`. `False`: retain their initialization and ignore `organism_spec`. |
 | `organism_spec` | `None` | `None`: prefix loading. Supplied map: explicit source-to-target organism mapping. |
 | `heads` | `True` | `True`: load prediction-head state using prefix loading or `head_specs`. `False`: retain their initialization and ignore `head_specs`. |
@@ -62,7 +62,7 @@ See [Flexible Loading](#flexible-loading) for the organism and head arguments.
 | Artifact | Hugging Face Source | Final Path with `local_dir` |
 | --- | --- | --- |
 | Metadata | `<repo_id>/<repo_dir>/alphagenome_metadata.json` | `<local_dir>/alphagenome_metadata.json` |
-| State | `<repo_id>/<repo_dir>/alphagenome_<fold>.pt` | `<local_dir>/<local_filename>` |
+| State | `<repo_id>/<repo_dir>/alphagenome_<fold>.safetensors` | `<local_dir>/<local_filename>` |
 
 An explicit `local_filename` without `local_dir` instead resolves to `<current-working-directory>/<local_filename>`.
 

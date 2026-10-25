@@ -120,7 +120,7 @@ model.save("checkpoint/model")
 loaded_model = AlphaGenome.load("checkpoint/model")
 ```
 
-The directory contains `config.json`, `metadata.pt`, and `model.pt`. Pass the
+The directory contains `config.json`, `metadata.json`, and `model.safetensors`. Pass the
 `device` argument when loading to select the model device (default `"cpu"`).
 Optimizer state and training progress are the user's responsibility.
 

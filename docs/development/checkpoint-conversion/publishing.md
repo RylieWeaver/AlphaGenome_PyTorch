@@ -2,7 +2,7 @@
 
 {bdg-danger}`External write`
 
-This maintainer helper publishes a complete converted artifact set to a Hugging Face model repository. The local directory must contain all five `alphagenome_<fold>.pt` files and all three metadata files described in [JAX-to-PyTorch Conversion](jax-to-pytorch.md).
+This maintainer helper publishes a complete converted artifact set to a Hugging Face model repository. The local directory must contain all five `alphagenome_<fold>.safetensors` files and all three metadata files described in [JAX-to-PyTorch Conversion](jax-to-pytorch.md).
 
 ## Preview Uploads
 
